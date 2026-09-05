@@ -46,6 +46,7 @@ venv.bak/
 # Docs & SourceCode
 SnowLumaDocs-main/
 SnowLuma-main/
+utils/
 
 # Build Output
 build/
