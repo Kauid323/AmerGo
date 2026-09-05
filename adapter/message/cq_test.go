@@ -1,6 +1,7 @@
 package message
 
 import (
+	"amer/config"
 	"strings"
 	"testing"
 )
@@ -100,6 +101,10 @@ func TestCQImageWithYunhuUpload(t *testing.T) {
 }
 
 func TestCalculateDisplayDimensions(t *testing.T) {
+	config.AppConfig.Image.Scale = 0
+	config.AppConfig.Image.MaxWidth = 300
+	config.AppConfig.Image.MaxHeight = 320
+
 	tests := []struct {
 		name         string
 		w, h         int
@@ -122,6 +127,36 @@ func TestCalculateDisplayDimensions(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestCalculateDisplayDimensionsWithCustomConfig(t *testing.T) {
+	// 1. 自定义缩小比例为 0.5 (50%)
+	config.AppConfig.Image.Scale = 0.5
+	gotW, gotH := calculateDisplayDimensions(1000, 800)
+	if gotW != 500 || gotH != 400 {
+		t.Errorf("Scale 0.5: got (%d, %d), want (500, 400)", gotW, gotH)
+	}
+
+	// 2. 自定义缩小比例百分比写法 50 (转换为 0.5)
+	config.AppConfig.Image.Scale = 50
+	gotW, gotH = calculateDisplayDimensions(1000, 800)
+	if gotW != 500 || gotH != 400 {
+		t.Errorf("Scale 50: got (%d, %d), want (500, 400)", gotW, gotH)
+	}
+
+	// 3. 自定义最大宽高 (max_width: 500, max_height: 400)
+	config.AppConfig.Image.Scale = 0
+	config.AppConfig.Image.MaxWidth = 500
+	config.AppConfig.Image.MaxHeight = 400
+	gotW, gotH = calculateDisplayDimensions(1000, 800)
+	if gotW != 500 || gotH != 400 {
+		t.Errorf("Custom Max: got (%d, %d), want (500, 400)", gotW, gotH)
+	}
+
+	// 恢复默认
+	config.AppConfig.Image.Scale = 0
+	config.AppConfig.Image.MaxWidth = 300
+	config.AppConfig.Image.MaxHeight = 320
 }
 
 func TestGetImageDimensionsWebP(t *testing.T) {

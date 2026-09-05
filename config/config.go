@@ -51,6 +51,12 @@ type Config struct {
 		MessageYH         string `yaml:"message_yh"`
 		MessageYHFollowed string `yaml:"message_yh_followed"`
 	} `yaml:"messages"`
+
+	Image struct {
+		Scale     float64 `yaml:"scale"`      // 自定义缩小比例 (例如 0.5 或 50 表示缩小为原图的 50%；设为 0 则按 max_width 和 max_height 自动等比缩放)
+		MaxWidth  int     `yaml:"max_width"`  // 最大显示宽度 (px)，默认 300
+		MaxHeight int     `yaml:"max_height"` // 最大显示高度 (px)，默认 320
+	} `yaml:"image"`
 }
 
 var AppConfig Config
@@ -74,6 +80,12 @@ func LoadConfig(path string) (*Config, error) {
 	}
 	if cfg.YH.Webhook.Path == "" {
 		cfg.YH.Webhook.Path = "/yh/webhook"
+	}
+	if cfg.Image.MaxWidth <= 0 {
+		cfg.Image.MaxWidth = 300
+	}
+	if cfg.Image.MaxHeight <= 0 {
+		cfg.Image.MaxHeight = 320
 	}
 
 	AppConfig = cfg

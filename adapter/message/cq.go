@@ -1,6 +1,7 @@
 package message
 
 import (
+	"amer/config"
 	"bytes"
 	"encoding/base64"
 	"encoding/binary"
@@ -78,30 +79,58 @@ func getImageDimensions(data []byte) (int, int) {
 	return 0, 0
 }
 
-// calculateDisplayDimensions scales original image dimensions down proportionally if it exceeds max constraints.
+// calculateDisplayDimensions scales original image dimensions down proportionally according to user config.
 func calculateDisplayDimensions(origW, origH int) (int, int) {
 	if origW <= 0 || origH <= 0 {
 		return 0, 0
 	}
 
+	cfg := config.AppConfig.Image
+	scale := cfg.Scale
+	maxW := float64(cfg.MaxWidth)
+	maxH := float64(cfg.MaxHeight)
+
+	if maxW <= 0 {
+		maxW = maxImageDisplayWidth
+	}
+	if maxH <= 0 {
+		maxH = maxImageDisplayHeight
+	}
+
 	w := float64(origW)
 	h := float64(origH)
 
+	// 1. 如果配置了自定义缩小比例 (如 scale: 0.5 或 scale: 50)
+	if scale > 0 {
+		if scale > 1.0 && scale <= 100.0 {
+			scale = scale / 100.0 // 容错兼容百分比写法: 50 -> 0.5
+		}
+		dW := int(w*scale + 0.5)
+		dH := int(h*scale + 0.5)
+		if dW < 1 {
+			dW = 1
+		}
+		if dH < 1 {
+			dH = 1
+		}
+		return dW, dH
+	}
+
+	// 2. 默认模式：按最大宽高阈值自动等比例缩小
 	// 如果原图在最大限制以内，保持原尺寸展示，不放大
-	if w <= maxImageDisplayWidth && h <= maxImageDisplayHeight {
+	if w <= maxW && h <= maxH {
 		return origW, origH
 	}
 
-	// 超过最大限制，等比例缩小
-	scaleW := maxImageDisplayWidth / w
-	scaleH := maxImageDisplayHeight / h
-	scale := scaleW
-	if scaleH < scale {
-		scale = scaleH
+	scaleW := maxW / w
+	scaleH := maxH / h
+	autoScale := scaleW
+	if scaleH < autoScale {
+		autoScale = scaleH
 	}
 
-	dW := int(w*scale + 0.5)
-	dH := int(h*scale + 0.5)
+	dW := int(w*autoScale + 0.5)
+	dH := int(h*autoScale + 0.5)
 	if dW < 1 {
 		dW = 1
 	}
@@ -118,7 +147,15 @@ func formatImageHTML(imgURL string, origW, origH int) string {
 		dW, dH := calculateDisplayDimensions(origW, origH)
 		return fmt.Sprintf(`<br><img src="%s" width="%d" height="%d" style="width: %dpx; height: %dpx; max-width: 100%%; object-fit: contain; border-radius: 4px; margin: 5px 0;"><br>`, escapedURL, dW, dH, dW, dH)
 	}
-	return fmt.Sprintf(`<br><img src="%s" style="max-width: 300px; max-height: 320px; border-radius: 4px; margin: 5px 0; object-fit: contain;"><br>`, escapedURL)
+	maxW := config.AppConfig.Image.MaxWidth
+	maxH := config.AppConfig.Image.MaxHeight
+	if maxW <= 0 {
+		maxW = int(maxImageDisplayWidth)
+	}
+	if maxH <= 0 {
+		maxH = int(maxImageDisplayHeight)
+	}
+	return fmt.Sprintf(`<br><img src="%s" style="max-width: %dpx; max-height: %dpx; border-radius: 4px; margin: 5px 0; object-fit: contain;"><br>`, escapedURL, maxW, maxH)
 }
 
 func downloadImageData(imgURL string) ([]byte, string, error) {
