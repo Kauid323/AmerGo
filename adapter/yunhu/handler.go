@@ -239,6 +239,9 @@ func handleNormalMessage(event model.YunhuEvent) {
 
 	msgType := "text"
 	content := msg.Content.Text
+	if content != "" {
+		content = message.ConvertYunhuEmoji(content)
+	}
 	videoLocalPath := ""
 
 	if content == "" {

@@ -408,6 +408,9 @@ func formatReplySummary(raw string) string {
 	// 还原 CQ 码文本转义 (&#91; -> [, &#93; -> ], &#44; -> ,, &#38; -> &)
 	raw = message.UnescapeCQ(raw)
 
+	// 转换云湖文本表情为 Emoji
+	raw = message.ConvertYunhuEmoji(raw)
+
 	// 转换 CQ 码为自然语言描述
 	reImg := regexp.MustCompile(`\[CQ:image,[^\]]+\]`)
 	raw = reImg.ReplaceAllString(raw, "[图片]")

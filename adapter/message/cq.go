@@ -421,6 +421,7 @@ func CQToHTMLWithGroup(msg string, groupID int64) string {
 	res = strings.ReplaceAll(res, "&#91;", "[")
 	res = strings.ReplaceAll(res, "&#93;", "]")
 	res = strings.ReplaceAll(res, "&#44;", ",")
+	res = ConvertYunhuEmoji(res)
 	res = regexp.MustCompile(`(</b>)  +`).ReplaceAllString(res, "$1 ")
 	return res
 }
@@ -966,6 +967,7 @@ func FormatCQAtText(msg string, groupID int64) string {
 		return fmt.Sprintf("@%s ", displayName)
 	})
 
-	return UnescapeCQ(msg)
+	msg = UnescapeCQ(msg)
+	return ConvertYunhuEmoji(msg)
 }
 
