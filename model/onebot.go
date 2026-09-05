@@ -62,10 +62,29 @@ type OneBotEvent struct {
 	GroupID     FlexibleInt64   `json:"group_id"`
 	Sender      OneBotSender    `json:"sender"`
 
-	// Request / Notice fields
-	DetailType string `json:"detail_type"`
-	Flag       string `json:"flag"`
-	Echo       string `json:"echo"`
+	// Request / Notice / Meta fields
+	RequestType   string        `json:"request_type"`    // "friend", "group"
+	NoticeType    string        `json:"notice_type"`     // "group_increase", "group_decrease", etc.
+	MetaEventType string        `json:"meta_event_type"` // "heartbeat", "lifecycle"
+	DetailType    string        `json:"detail_type"`
+	OperatorID    FlexibleInt64 `json:"operator_id"`
+	Comment       string        `json:"comment"`
+	Flag          string        `json:"flag"`
+	Echo          string        `json:"echo"`
+}
+
+func (e *OneBotEvent) GetRequestType() string {
+	if e.RequestType != "" {
+		return e.RequestType
+	}
+	return e.DetailType
+}
+
+func (e *OneBotEvent) GetNoticeType() string {
+	if e.NoticeType != "" {
+		return e.NoticeType
+	}
+	return e.DetailType
 }
 
 func (e *OneBotEvent) GetSenderUserID() int64 {

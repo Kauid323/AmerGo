@@ -21,7 +21,7 @@ func HandleOneBotEvent(event model.OneBotEvent) {
 	case "request":
 		handleQQRequest(event)
 	case "notice":
-		log.Printf("[QQ Notice] 收到通知事件: %s", event.DetailType)
+		handleQQNotice(event)
 	case "meta_event":
 		// Heartbeat / lifecycle
 	default:
@@ -60,6 +60,11 @@ func handleQQMessage(event model.OneBotEvent) {
 
 	if event.MessageType == "private" {
 		log.Printf("[QQ Private Msg] 来自 %d (%s): %s", senderUserID, event.Sender.Nickname, rawMsg)
+		if strings.Contains(rawMsg, "qun.invite") || strings.Contains(rawMsg, "group/invite_join") || strings.Contains(rawMsg, "邀请你加入群聊") {
+			log.Printf("[QQ Private Msg] 收到群邀请卡片私聊，自动解析凭据确认入群")
+			tryAcceptInviteCard(rawMsg, senderUserID)
+			return
+		}
 		_ = GlobalOneBotServer.SendPrivateMsg(senderUserID, "你好！Amer 已更新为纯互通版（AI 功能已关闭）。在群内将消息同步至云湖吧！")
 		return
 	}
@@ -425,17 +430,135 @@ func handleQQCommand(event model.OneBotEvent, groupIDStr, userIDStr, cmd string)
 }
 
 func handleQQRequest(event model.OneBotEvent) {
-	log.Printf("[QQ Request] 收到请求: %s, Flag: %s", event.DetailType, event.Flag)
-	if event.DetailType == "friend" {
-		_, _ = GlobalOneBotServer.CallAPI("set_friend_add_request", map[string]interface{}{
+	reqType := event.GetRequestType()
+	log.Printf("[QQ Request] 收到请求: 类型=%s, 子类型=%s, 群号=%d, 发起人/用户=%d, Flag=%s",
+		reqType, event.SubType, event.GroupID.Int64(), event.UserID.Int64(), event.Flag)
+
+	if reqType == "friend" {
+		resp, err := GlobalOneBotServer.CallAPI("set_friend_add_request", map[string]interface{}{
 			"flag":    event.Flag,
 			"approve": true,
 		})
-	} else if event.DetailType == "group" {
-		_, _ = GlobalOneBotServer.CallAPI("set_group_add_request", map[string]interface{}{
-			"flag":     event.Flag,
-			"sub_type": event.SubType,
-			"approve":  true,
-		})
+		if err != nil || resp.Status == "failed" {
+			log.Printf("[QQ Request Error] 自动同意好友申请失败: %v, resp: %+v", err, resp)
+		} else {
+			log.Printf("[QQ Request Success] 已自动同意来自用户 %d 的好友申请", event.UserID.Int64())
+		}
+	} else if reqType == "group" {
+		subType := event.SubType
+		if subType == "" {
+			subType = "invite"
+		}
+
+		go func(ev model.OneBotEvent, sType string) {
+			if sType == "invite" {
+				time.Sleep(1000 * time.Millisecond)
+			}
+
+			// 适配多个候选 flag: 原生 flag、eventType: 2 (自己确认入群，避开 eventType: 7 管理员审批) 与 legacy 格式
+			flags := []string{ev.Flag}
+			if strings.Contains(ev.Flag, ":7:") {
+				flags = append(flags, strings.Replace(ev.Flag, ":7:", ":2:", 1))
+			}
+			flags = append(flags, fmt.Sprintf("invite:%d:%d", ev.GroupID.Int64(), ev.UserID.Int64()))
+
+			for attempt := 1; attempt <= 3; attempt++ {
+				for _, flagCandidate := range flags {
+					resp, err := GlobalOneBotServer.CallAPI("set_group_add_request", map[string]interface{}{
+						"flag":     flagCandidate,
+						"sub_type": sType,
+						"type":     sType,
+						"approve":  true,
+					})
+					if err == nil && resp.Status == "ok" {
+						if sType == "invite" {
+							log.Printf("[QQ Request Success] 已自动同意群邀请！成功加入群: %d (邀请人: %d, Flag: %s)", ev.GroupID.Int64(), ev.UserID.Int64(), flagCandidate)
+						} else {
+							log.Printf("[QQ Request Success] 已自动同意加群请求！群号: %d (申请人: %d)", ev.GroupID.Int64(), ev.UserID.Int64())
+						}
+						return
+					}
+				}
+
+				log.Printf("[QQ Request Warning] 第 %d 次处理群请求未成功 (群: %d, sub_type: %s)，准备重试...", attempt, ev.GroupID.Int64(), sType)
+				if attempt < 3 {
+					time.Sleep(1500 * time.Millisecond)
+				}
+			}
+			log.Printf("[QQ Request Error] 处理群邀请/加群最终失败 (群: %d, Flag: %s)", ev.GroupID.Int64(), ev.Flag)
+		}(event, subType)
+	}
+}
+
+func tryAcceptInviteCard(rawMsg string, senderUserID int64) {
+	if !strings.Contains(rawMsg, "group/invite_join") {
+		return
+	}
+	idx := strings.Index(rawMsg, "groupcode=")
+	if idx == -1 {
+		return
+	}
+	sub := rawMsg[idx:]
+	var groupCode, msgSeq string
+	for _, part := range strings.Split(sub, "&") {
+		part = strings.ReplaceAll(part, "\\", "")
+		part = strings.ReplaceAll(part, "\"", "")
+		part = strings.ReplaceAll(part, "}", "")
+		part = strings.ReplaceAll(part, "]", "")
+		kv := strings.Split(part, "=")
+		if len(kv) >= 2 {
+			k := strings.TrimSpace(kv[0])
+			v := strings.TrimSpace(kv[1])
+			if k == "groupcode" {
+				groupCode = v
+			} else if k == "msgseq" {
+				msgSeq = v
+			}
+		}
+	}
+
+	if groupCode != "" {
+		log.Printf("[QQ Invite Card] 解析到群邀请链接卡片: 群号=%s, msgseq=%s", groupCode, msgSeq)
+		go func() {
+			time.Sleep(500 * time.Millisecond)
+			if msgSeq != "" {
+				flagCanonical := fmt.Sprintf("slreq:1:%s:%s:2:0", msgSeq, groupCode)
+				resp, err := GlobalOneBotServer.CallAPI("set_group_add_request", map[string]interface{}{
+					"flag":     flagCanonical,
+					"sub_type": "invite",
+					"type":     "invite",
+					"approve":  true,
+				})
+				if err == nil && resp.Status == "ok" {
+					log.Printf("[QQ Request Success] 通过邀请卡片 msgseq 成功确认加入群聊 %s！", groupCode)
+					return
+				}
+			}
+			flagLegacy := fmt.Sprintf("invite:%s:%d", groupCode, senderUserID)
+			resp, err := GlobalOneBotServer.CallAPI("set_group_add_request", map[string]interface{}{
+				"flag":     flagLegacy,
+				"sub_type": "invite",
+				"type":     "invite",
+				"approve":  true,
+			})
+			if err == nil && resp.Status == "ok" {
+				log.Printf("[QQ Request Success] 通过 legacy invite flag 成功确认加入群聊 %s！", groupCode)
+				return
+			}
+		}()
+	}
+}
+
+func handleQQNotice(event model.OneBotEvent) {
+	noticeType := event.GetNoticeType()
+	switch noticeType {
+	case "group_increase":
+		log.Printf("[QQ Notice] 群成员增加 (群: %d, 用户: %d, 操作者: %d, 子类型: %s)",
+			event.GroupID.Int64(), event.UserID.Int64(), event.OperatorID.Int64(), event.SubType)
+	case "group_decrease":
+		log.Printf("[QQ Notice] 群成员减少 (群: %d, 用户: %d, 操作者: %d, 子类型: %s)",
+			event.GroupID.Int64(), event.UserID.Int64(), event.OperatorID.Int64(), event.SubType)
+	default:
+		log.Printf("[QQ Notice] 收到通知事件: %s (子类型: %s)", noticeType, event.SubType)
 	}
 }
