@@ -1,11 +1,13 @@
 package qq
 
 import (
+	"amer/adapter/message"
 	"amer/model"
 	"encoding/json"
 	"fmt"
 	"log"
 	"net/http"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -354,4 +356,158 @@ func (s *OneBotServer) GetGroupMemberName(groupID int64, userID int64) string {
 	s.memberMu.Unlock()
 
 	return defaultName
+}
+
+var replyMsgCache sync.Map // key: int64, value: *message.ReplyMsgInfo
+
+func extractTextFromOneBotMsg(msg interface{}) string {
+	if msg == nil {
+		return ""
+	}
+	if s, ok := msg.(string); ok {
+		return s
+	}
+	if arr, ok := msg.([]interface{}); ok {
+		var sb strings.Builder
+		for _, item := range arr {
+			if m, ok := item.(map[string]interface{}); ok {
+				segType, _ := m["type"].(string)
+				data, _ := m["data"].(map[string]interface{})
+				switch segType {
+				case "text":
+					if text, ok := data["text"].(string); ok {
+						sb.WriteString(text)
+					}
+				case "image":
+					sb.WriteString("[图片]")
+				case "video":
+					sb.WriteString("[视频]")
+				case "record":
+					sb.WriteString("[语音]")
+				case "face":
+					sb.WriteString("[表情]")
+				case "at":
+					if qq, ok := data["qq"].(string); ok {
+						sb.WriteString("@" + qq + " ")
+					}
+				default:
+					sb.WriteString(fmt.Sprintf("[%s]", segType))
+				}
+			}
+		}
+		return sb.String()
+	}
+	return ""
+}
+
+func formatReplySummary(raw string) string {
+	// 去除嵌套的 reply CQ 码
+	reReply := regexp.MustCompile(`\[CQ:reply,[^\]]+\]`)
+	raw = reReply.ReplaceAllString(raw, "")
+
+	// 还原 CQ 码文本转义 (&#91; -> [, &#93; -> ], &#44; -> ,, &#38; -> &)
+	raw = message.UnescapeCQ(raw)
+
+	// 转换 CQ 码为自然语言描述
+	reImg := regexp.MustCompile(`\[CQ:image,[^\]]+\]`)
+	raw = reImg.ReplaceAllString(raw, "[图片]")
+	reVideo := regexp.MustCompile(`\[CQ:video,[^\]]+\]`)
+	raw = reVideo.ReplaceAllString(raw, "[视频]")
+	reAudio := regexp.MustCompile(`\[CQ:record,[^\]]+\]`)
+	raw = reAudio.ReplaceAllString(raw, "[语音]")
+	reFace := regexp.MustCompile(`\[CQ:face,[^\]]+\]`)
+	raw = reFace.ReplaceAllString(raw, "[表情]")
+
+	reAt := regexp.MustCompile(`\[CQ:at,qq=([^,\]]+)[^\]]*\] ?`)
+	raw = reAt.ReplaceAllStringFunc(raw, func(m string) string {
+		sub := reAt.FindStringSubmatch(m)
+		if len(sub) >= 2 {
+			qq := sub[1]
+			if qq == "all" {
+				return "@全体成员 "
+			}
+			return "@" + qq + " "
+		}
+		return "@某人 "
+	})
+
+	raw = strings.ReplaceAll(raw, "\r\n", " ")
+	raw = strings.ReplaceAll(raw, "\n", " ")
+	raw = strings.TrimSpace(raw)
+
+	runes := []rune(raw)
+	if len(runes) > 80 {
+		raw = string(runes[:80]) + "..."
+	}
+	return raw
+}
+
+// GetReplyMsg fetches quoted message content and sender by messageID from OneBot API with caching.
+func (s *OneBotServer) GetReplyMsg(messageID int64, groupID int64) (*message.ReplyMsgInfo, error) {
+	if messageID == 0 {
+		return nil, fmt.Errorf("invalid message_id: 0")
+	}
+
+	if val, ok := replyMsgCache.Load(messageID); ok {
+		if info, ok := val.(*message.ReplyMsgInfo); ok {
+			return info, nil
+		}
+	}
+
+	resp, err := s.CallAPIWithTimeout("get_msg", map[string]interface{}{
+		"message_id": messageID,
+	}, 3*time.Second)
+	if err != nil {
+		return nil, err
+	}
+	if resp.Status != "ok" {
+		return nil, fmt.Errorf("get_msg failed with retcode %d: %s", resp.RetCode, resp.Wording)
+	}
+
+	var msgData struct {
+		Time        int64               `json:"time"`
+		MessageType string              `json:"message_type"`
+		MessageID   model.FlexibleInt64 `json:"message_id"`
+		Sender      struct {
+			UserID   model.FlexibleInt64 `json:"user_id"`
+			Nickname string              `json:"nickname"`
+			Card     string              `json:"card"`
+			Role     string              `json:"role"`
+		} `json:"sender"`
+		Message    interface{} `json:"message"`
+		RawMessage string      `json:"raw_message"`
+	}
+
+	if err := json.Unmarshal(resp.Data, &msgData); err != nil {
+		return nil, err
+	}
+
+	senderName := strings.TrimSpace(msgData.Sender.Card)
+	if senderName == "" {
+		senderName = strings.TrimSpace(msgData.Sender.Nickname)
+	}
+	senderUID := msgData.Sender.UserID.Int64()
+	if senderName == "" && senderUID != 0 {
+		senderName = s.GetGroupMemberName(groupID, senderUID)
+	}
+	if senderName == "" && senderUID != 0 {
+		senderName = strconv.FormatInt(senderUID, 10)
+	}
+
+	rawText := msgData.RawMessage
+	if rawText == "" {
+		rawText = extractTextFromOneBotMsg(msgData.Message)
+	}
+
+	summary := formatReplySummary(rawText)
+
+	info := &message.ReplyMsgInfo{
+		SenderName: senderName,
+		SenderUID:  senderUID,
+		RawText:    rawText,
+		Summary:    summary,
+	}
+
+	replyMsgCache.Store(messageID, info)
+	return info, nil
 }

@@ -107,9 +107,10 @@ func handleQQMessage(event model.OneBotEvent) {
 		avatarURL := fmt.Sprintf("http://q1.qlogo.cn/g?b=qq&nk=%d&s=100", senderUserID)
 
 		contentHTML := fmt.Sprintf(
-			`<div style="display: flex; align-items: flex-start; margin-bottom: 10px;"><img src="%s" alt="用户头像" style="width: 36px; height: 36px; border-radius: 50%%; margin-right: 10px;"><div style="flex: 1;"><strong style="font-size: 14px; color: #333;">%s</strong><p style="font-size: 8px; color: #6c757d; margin-top: 2px;"><strong>用户ID: </strong>%s</p></div></div><div style="background-color: #f9f9f9; padding: 5px; border-radius: 5px;"><p style="color: #000000;">%s</p></div><div style="font-family: Arial, sans-serif; line-height: 1.4; font-size: 12px; color: #888;"><details style="margin-top: 5px;"><summary style="cursor: pointer; color: #007bff; font-size: 12px;">详情</summary><p style="margin: 3px 0;">群聊: %s</p><p style="margin: 3px 0;">ID: %s</p><p style="margin: 3px 0;">发送时间: %s</p></details></div>`,
+			`<div style="display:flex;align-items:center;gap:6px;margin-bottom:3px;"><img src="%s" style="width:24px;height:24px;border-radius:50%%;"><span style="font-size:13px;font-weight:600;color:#333;">%s</span><span style="font-size:11px;color:#888;">(%s)</span></div><div style="background:#f8f9fa;padding:5px 8px;border-radius:5px;font-size:13px;color:#111;line-height:1.4;word-break:break-word;">%s</div><div style="font-size:11px;color:#999;margin-top:2px;"><details><summary style="cursor:pointer;color:#2563eb;font-size:11px;">详情</summary><div style="padding:2px 0;line-height:1.3;">群: %s | ID: %s | %s</div></details></div>`,
 			avatarURL, cleanedName, senderUserIDStr, cleanedMsgHTML, groupName, groupIDStr, time.Now().Format("2006-01-02 15:04:05"),
 		)
+		contentHTML = message.CompressHTML(contentHTML)
 
 		if strings.Contains(rawMsg, "@全体成员") {
 			message.SetBoardForAllGroups("QQ", groupIDStr, strings.ReplaceAll(rawMsg, "@全体成员", ""), groupName)
@@ -216,6 +217,24 @@ func parseNodeContent(content interface{}, groupID int64) string {
 				case "inline_keyboard":
 					parsed := model.ParseInlineKeyboardSegment(dataMap)
 					sb.WriteString(message.CQToHTMLWithGroup(parsed, groupID))
+				case "reply":
+					replyIDStr, _ := dataMap["id"].(string)
+					if replyIDStr == "" {
+						if idNum, ok := dataMap["id"].(float64); ok {
+							replyIDStr = strconv.FormatInt(int64(idNum), 10)
+						}
+					}
+					if replyIDStr != "" {
+						var replyInfo *message.ReplyMsgInfo
+						if targetID, err := strconv.ParseInt(replyIDStr, 10, 64); err == nil && targetID != 0 {
+							replyInfo, _ = GlobalOneBotServer.GetReplyMsg(targetID, groupID)
+						}
+						if replyInfo != nil && replyInfo.SenderName != "" {
+							sb.WriteString(fmt.Sprintf(`<div style="background-color: #f1f3f5; border-left: 3px solid #007bff; padding: 4px 8px; margin-bottom: 6px; border-radius: 2px 4px 4px 2px; font-size: 12px; color: #666;"><strong style="color: #007bff;">@%s</strong>: %s</div>`, html.EscapeString(message.UnescapeCQ(replyInfo.SenderName)), html.EscapeString(message.UnescapeCQ(replyInfo.Summary))))
+						} else {
+							sb.WriteString(`<div style="background-color: #f1f3f5; border-left: 3px solid #007bff; padding: 4px 8px; margin-bottom: 6px; border-radius: 2px 4px 4px 2px; font-size: 12px; color: #666;"><strong style="color: #007bff;">[引用消息]</strong></div>`)
+						}
+					}
 				default:
 					sb.WriteString(fmt.Sprintf("[%s消息]", elemType))
 				}
@@ -267,15 +286,16 @@ func FetchForwardMsgHTML(forwardID, groupName, senderName, senderIDStr string, g
 					nodeContentHTML := parseNodeContent(nodeContent, groupID)
 
 					nodesSB.WriteString(fmt.Sprintf(
-						`<div style="background-color: #ffffff; padding: 6px 8px; border-radius: 4px; margin-bottom: 5px; border: 1px solid #e9ecef;"><span style="color: #007bff; font-weight: bold;">%s (%s):</span> <span style="color: #212529;">%s</span></div>`,
+						`<div style="background:#fff;padding:3px 6px;border-radius:3px;margin-bottom:3px;border:1px solid #edf2f7;font-size:12px;"><span style="color:#2563eb;font-weight:600;">%s (%s):</span> <span>%s</span></div>`,
 						html.EscapeString(nodeSender), timeStr, nodeContentHTML,
 					))
 				}
 
-				return fmt.Sprintf(
-					`<div style="display: flex; align-items: flex-start; margin-bottom: 10px;"><img src="%s" alt="用户头像" style="width: 36px; height: 36px; border-radius: 50%%; margin-right: 10px;"><div style="flex: 1;"><strong style="font-size: 14px; color: #333;">%s</strong><p style="font-size: 8px; color: #6c757d; margin-top: 2px;"><strong>用户ID: </strong>%s</p></div></div><div style="background-color: #f9f9f9; padding: 10px; border-radius: 5px; border: 1px solid #ddd;"><div style="font-weight: bold; margin-bottom: 8px; color: #333;">📨 合并转发消息 (共 %d 条)</div>%s</div><div style="font-family: Arial, sans-serif; line-height: 1.4; font-size: 12px; color: #888;"><details style="margin-top: 5px;"><summary style="cursor: pointer; color: #007bff; font-size: 12px;">详情</summary><p style="margin: 3px 0;">群聊: %s</p><p style="margin: 3px 0;">ID: %s</p><p style="margin: 3px 0;">发送时间: %s</p></details></div>`,
+				forwardHTML := fmt.Sprintf(
+					`<div style="display:flex;align-items:center;gap:6px;margin-bottom:3px;"><img src="%s" style="width:24px;height:24px;border-radius:50%%;"><span style="font-size:13px;font-weight:600;color:#333;">%s</span><span style="font-size:11px;color:#888;">(%s)</span></div><div style="background:#f8f9fa;padding:6px;border-radius:5px;border:1px solid #e2e8f0;"><div style="font-weight:600;margin-bottom:4px;color:#333;font-size:12px;">📨 合并转发消息 (共 %d 条)</div>%s</div><div style="font-size:11px;color:#999;margin-top:2px;"><details><summary style="cursor:pointer;color:#2563eb;font-size:11px;">详情</summary><div style="padding:2px 0;line-height:1.3;">群: %s | ID: %s | %s</div></details></div>`,
 					avatarURL, senderName, senderIDStr, len(forwardData.Messages), nodesSB.String(), groupName, groupName, time.Now().Format("2006-01-02 15:04:05"),
 				)
+				return message.CompressHTML(forwardHTML)
 			}
 		}
 	case <-time.After(1500 * time.Millisecond):
@@ -287,10 +307,11 @@ func FetchForwardMsgHTML(forwardID, groupName, senderName, senderIDStr string, g
 
 func BuildForwardFallbackHTML(groupName, senderName, senderIDStr string) string {
 	avatarURL := fmt.Sprintf("http://q1.qlogo.cn/g?b=qq&nk=%s&s=100", senderIDStr)
-	return fmt.Sprintf(
-		`<div style="display: flex; align-items: flex-start; margin-bottom: 10px;"><img src="%s" alt="用户头像" style="width: 36px; height: 36px; border-radius: 50%%; margin-right: 10px;"><div style="flex: 1;"><strong style="font-size: 14px; color: #333;">%s</strong><p style="font-size: 8px; color: #6c757d; margin-top: 2px;"><strong>用户ID: </strong>%s</p></div></div><div style="background-color: #f9f9f9; padding: 10px; border-radius: 5px; border: 1px solid #ddd;"><div style="font-weight: bold; margin-bottom: 5px; color: #333;">📦 [QQ 合并转发消息]</div><div style="color: #666; font-size: 12px;">转发聊天记录</div></div><div style="font-family: Arial, sans-serif; line-height: 1.4; font-size: 12px; color: #888;"><details style="margin-top: 5px;"><summary style="cursor: pointer; color: #007bff; font-size: 12px;">详情</summary><p style="margin: 3px 0;">群聊: %s</p><p style="margin: 3px 0;">ID: %s</p><p style="margin: 3px 0;">发送时间: %s</p></details></div>`,
+	fallbackHTML := fmt.Sprintf(
+		`<div style="display:flex;align-items:center;gap:6px;margin-bottom:3px;"><img src="%s" style="width:24px;height:24px;border-radius:50%%;"><span style="font-size:13px;font-weight:600;color:#333;">%s</span><span style="font-size:11px;color:#888;">(%s)</span></div><div style="background:#f8f9fa;padding:6px;border-radius:5px;border:1px solid #e2e8f0;font-size:12px;"><div style="font-weight:600;color:#333;">📦 [QQ 合并转发消息]</div><div style="color:#666;">转发聊天记录</div></div><div style="font-size:11px;color:#999;margin-top:2px;"><details><summary style="cursor:pointer;color:#2563eb;font-size:11px;">详情</summary><div style="padding:2px 0;line-height:1.3;">群: %s | ID: %s | %s</div></details></div>`,
 		avatarURL, senderName, senderIDStr, groupName, groupName, time.Now().Format("2006-01-02 15:04:05"),
 	)
+	return message.CompressHTML(fallbackHTML)
 }
 
 func handleQQCommand(event model.OneBotEvent, groupIDStr, userIDStr, cmd string) bool {

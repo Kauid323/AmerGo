@@ -10,12 +10,20 @@ import (
 	"time"
 )
 
+type ReplyMsgInfo struct {
+	SenderName string
+	SenderUID  int64
+	RawText    string
+	Summary    string
+}
+
 type QQMessageSender interface {
 	SendGroupMsg(groupID int64, message string) error
 	SendGroupForwardMsg(groupID int64, nodes []interface{}) error
 	GetGroupName(groupID int64) string
 	GetSelfInfo() (int64, string)
 	GetGroupMemberName(groupID int64, userID int64) string
+	GetReplyMsg(messageID int64, groupID int64) (*ReplyMsgInfo, error)
 }
 
 type YunhuMessageSender interface {

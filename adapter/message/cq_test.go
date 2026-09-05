@@ -21,6 +21,25 @@ func (m *mockQQSender) GetGroupMemberName(groupID int64, userID int64) string {
 	}
 	return ""
 }
+func (m *mockQQSender) GetReplyMsg(messageID int64, groupID int64) (*ReplyMsgInfo, error) {
+	if messageID == 80174758 {
+		return &ReplyMsgInfo{
+			SenderName: "那狗吧",
+			SenderUID:  241638640,
+			RawText:    "我周五先走了",
+			Summary:    "我周五先走了",
+		}, nil
+	}
+	if messageID == 80174759 {
+		return &ReplyMsgInfo{
+			SenderName: "Amer(QQ云湖互通机器人)",
+			SenderUID:  3218936228,
+			RawText:    "&#91;云湖群-857744874&#93; 那狗吧(8516939): html按钮没有回调，别想着用",
+			Summary:    "&#91;云湖群-857744874&#93; 那狗吧(8516939): html按钮没有回调，别想着用",
+		}, nil
+	}
+	return nil, nil
+}
 
 func TestCQToHTML(t *testing.T) {
 	input := "[CQ:at,qq=123456]"
@@ -85,7 +104,7 @@ func TestCQImageWithYunhuUpload(t *testing.T) {
 	imageCache.Store("test_scaled_image.jpg", imageCacheItem{url: mockURL, width: 1920, height: 1080})
 	cqMsg := "[CQ:image,file=test_scaled_image.jpg,url=http://example.com/test.jpg]"
 	got := CQToHTML(cqMsg)
-	expected := `<br><img src="https://chat-img.jwznb.com/c91bb351c5fc283dfd9c95d0ec5d6c88.jpg" width="300" height="169" style="width: 300px; height: 169px; max-width: 100%; object-fit: contain; border-radius: 4px; margin: 5px 0;"><br>`
+	expected := `<img src="https://chat-img.jwznb.com/c91bb351c5fc283dfd9c95d0ec5d6c88.jpg" width="300" height="169" style="display:block;width:300px;height:169px;max-width:100%;object-fit:contain;border-radius:4px;margin:2px 0;">`
 	if got != expected {
 		t.Errorf("CQToHTML image with dimensions = %v, want %v", got, expected)
 	}
@@ -94,9 +113,17 @@ func TestCQImageWithYunhuUpload(t *testing.T) {
 	imageCache.Store("test_image_file.jpg", mockURL)
 	cqMsg2 := "[CQ:image,file=test_image_file.jpg,url=http://example.com/test.jpg]"
 	got2 := CQToHTML(cqMsg2)
-	expected2 := `<br><img src="https://chat-img.jwznb.com/c91bb351c5fc283dfd9c95d0ec5d6c88.jpg" style="max-width: 300px; max-height: 320px; border-radius: 4px; margin: 5px 0; object-fit: contain;"><br>`
+	expected2 := `<img src="https://chat-img.jwznb.com/c91bb351c5fc283dfd9c95d0ec5d6c88.jpg" style="display:block;max-width:300px;max-height:320px;border-radius:4px;margin:2px 0;object-fit:contain;">`
 	if got2 != expected2 {
 		t.Errorf("CQToHTML image fallback = %v, want %v", got2, expected2)
+	}
+}
+
+func TestCompressHTML(t *testing.T) {
+	input := `<div>   <p>Hello</p>   <br><br><br>   <span>World</span>   </div>`
+	got := CompressHTML(input)
+	if strings.Contains(got, ">   <") || strings.Contains(got, "<br><br>") {
+		t.Errorf("CompressHTML failed to compact whitespace or multiple br: %s", got)
 	}
 }
 
@@ -190,6 +217,71 @@ func TestInlineKeyboardRendering(t *testing.T) {
 		t.Errorf("expected buttons in text, got: %s", text)
 	}
 }
+
+func TestReplyMessageParsing(t *testing.T) {
+	RegisterQQSender(&mockQQSender{})
+	defer func() {
+		GlobalQQSender = nil
+	}()
+
+	rawMsg := "[CQ:reply,id=80174758]我周末选择跑路"
+
+	// 1. 测试 HTML 引用卡片格式化
+	htmlGot := CQToHTMLWithGroup(rawMsg, 721141253)
+	if !strings.Contains(htmlGot, "@那狗吧") || !strings.Contains(htmlGot, "我周五先走了") || !strings.Contains(htmlGot, "我周末选择跑路") {
+		t.Errorf("CQToHTMLWithGroup reply = %v", htmlGot)
+	}
+
+	// 2. 测试纯文本引用格式化
+	textGot := FormatCQAtText(rawMsg, 721141253)
+	if !strings.Contains(textGot, "「引用 @那狗吧: 我周五先走了」") || !strings.Contains(textGot, "我周末选择跑路") {
+		t.Errorf("FormatCQAtText reply = %v", textGot)
+	}
+
+	// 3. 测试未知引用消息降级
+	unknownMsg := "[CQ:reply,id=99999999]收到"
+	textUnknown := FormatCQAtText(unknownMsg, 721141253)
+	if !strings.Contains(textUnknown, "「引用消息」") || !strings.Contains(textUnknown, "收到") {
+		t.Errorf("FormatCQAtText unknown reply = %v", textUnknown)
+	}
+}
+
+func TestUnescapeCQAndReplyWithEntities(t *testing.T) {
+	RegisterQQSender(&mockQQSender{})
+	defer func() {
+		GlobalQQSender = nil
+	}()
+
+	// 1. 测试引用消息中含有 &#91; 和 &#93; 转义字符时，正确还原为 [ 和 ]，绝不出现 &amp;#91;
+	rawReply := "[CQ:reply,id=80174759]6666"
+	htmlGot := CQToHTMLWithGroup(rawReply, 721141253)
+	if strings.Contains(htmlGot, "&amp;#91;") || strings.Contains(htmlGot, "&#91;") {
+		t.Errorf("CQToHTMLWithGroup contains escaped entity: %v", htmlGot)
+	}
+	if !strings.Contains(htmlGot, "[云湖群-857744874]") {
+		t.Errorf("expected [云湖群-857744874] in html, got: %v", htmlGot)
+	}
+
+	textGot := FormatCQAtText(rawReply, 721141253)
+	if strings.Contains(textGot, "&#91;") || strings.Contains(textGot, "&#93;") {
+		t.Errorf("FormatCQAtText contains raw entity: %v", textGot)
+	}
+	if !strings.Contains(textGot, "[云湖群-857744874]") {
+		t.Errorf("expected [云湖群-857744874] in text, got: %v", textGot)
+	}
+
+	// 2. 测试正文中含有 &#91; 和 &#93; 的解码
+	bodyRaw := "&#91;测试群&#93; 消息内容"
+	bodyHTML := CQToHTMLWithGroup(bodyRaw, 0)
+	if strings.Contains(bodyHTML, "&#91;") {
+		t.Errorf("bodyHTML contains &#91;: %v", bodyHTML)
+	}
+	if !strings.Contains(bodyHTML, "[测试群]") {
+		t.Errorf("expected [测试群], got: %v", bodyHTML)
+	}
+}
+
+
 
 
 

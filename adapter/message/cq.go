@@ -140,12 +140,19 @@ func calculateDisplayDimensions(origW, origH int) (int, int) {
 	return dW, dH
 }
 
-// formatImageHTML generates an <img> tag with auto-scaled display width and height.
+// CompressHTML minimizes whitespace and redundant tags in HTML to reduce payload and rendering height.
+func CompressHTML(s string) string {
+	s = regexp.MustCompile(`>\s+<`).ReplaceAllString(s, "><")
+	s = regexp.MustCompile(`(<br\s*/?>\s*){2,}`).ReplaceAllString(s, "<br>")
+	return strings.TrimSpace(s)
+}
+
+// formatImageHTML generates an <img> tag with auto-scaled display width and height in a compact layout.
 func formatImageHTML(imgURL string, origW, origH int) string {
 	escapedURL := html.EscapeString(imgURL)
 	if origW > 0 && origH > 0 {
 		dW, dH := calculateDisplayDimensions(origW, origH)
-		return fmt.Sprintf(`<br><img src="%s" width="%d" height="%d" style="width: %dpx; height: %dpx; max-width: 100%%; object-fit: contain; border-radius: 4px; margin: 5px 0;"><br>`, escapedURL, dW, dH, dW, dH)
+		return fmt.Sprintf(`<img src="%s" width="%d" height="%d" style="display:block;width:%dpx;height:%dpx;max-width:100%%;object-fit:contain;border-radius:4px;margin:2px 0;">`, escapedURL, dW, dH, dW, dH)
 	}
 	maxW := config.AppConfig.Image.MaxWidth
 	maxH := config.AppConfig.Image.MaxHeight
@@ -155,7 +162,7 @@ func formatImageHTML(imgURL string, origW, origH int) string {
 	if maxH <= 0 {
 		maxH = int(maxImageDisplayHeight)
 	}
-	return fmt.Sprintf(`<br><img src="%s" style="max-width: %dpx; max-height: %dpx; border-radius: 4px; margin: 5px 0; object-fit: contain;"><br>`, escapedURL, maxW, maxH)
+	return fmt.Sprintf(`<img src="%s" style="display:block;max-width:%dpx;max-height:%dpx;border-radius:4px;margin:2px 0;object-fit:contain;">`, escapedURL, maxW, maxH)
 }
 
 func downloadImageData(imgURL string) ([]byte, string, error) {
@@ -285,6 +292,15 @@ func parseCQParams(paramsStr string) map[string]string {
 	return params
 }
 
+// UnescapeCQ decodes OneBot/CQ-escaped characters (&#91; -> [, &#93; -> ], &#44; -> ,, &#38; -> &).
+func UnescapeCQ(s string) string {
+	s = strings.ReplaceAll(s, "&#91;", "[")
+	s = strings.ReplaceAll(s, "&#93;", "]")
+	s = strings.ReplaceAll(s, "&#44;", ",")
+	s = strings.ReplaceAll(s, "&#38;", "&")
+	return s
+}
+
 // CQToHTML converts OneBot CQ codes in a message string to HTML elements for display in Yunhu HTML messages.
 func CQToHTML(msg string) string {
 	return CQToHTMLWithGroup(msg, 0)
@@ -342,12 +358,27 @@ func CQToHTMLWithGroup(msg string, groupID int64) string {
 			}
 			if videoURL != "" {
 				videoURL = html.UnescapeString(videoURL)
-				return fmt.Sprintf(`<br><video src="%s" controls style="max-width: 100%%; margin: 5px 0;"></video><br>`, videoURL)
+				return fmt.Sprintf(`<video src="%s" controls style="display:block;max-width:100%%;max-height:240px;margin:2px 0;border-radius:4px;"></video>`, videoURL)
 			}
 			return "[视频消息]"
 
 		case "reply":
-			return ""
+			replyIDStr := params["id"]
+			if replyIDStr == "" {
+				return ""
+			}
+			var replyInfo *ReplyMsgInfo
+			if GlobalQQSender != nil {
+				if replyID, err := strconv.ParseInt(replyIDStr, 10, 64); err == nil && replyID != 0 {
+					replyInfo, _ = GlobalQQSender.GetReplyMsg(replyID, groupID)
+				}
+			}
+			if replyInfo != nil && replyInfo.SenderName != "" {
+				escapedSender := html.EscapeString(UnescapeCQ(replyInfo.SenderName))
+				escapedSummary := html.EscapeString(UnescapeCQ(replyInfo.Summary))
+				return fmt.Sprintf(`<div style="background:#edf2f7;border-left:3px solid #2563eb;padding:3px 6px;margin-bottom:3px;border-radius:3px;font-size:12px;color:#4a5568;"><strong style="color:#2563eb;">@%s</strong>: %s</div>`, escapedSender, escapedSummary)
+			}
+			return `<div style="background:#edf2f7;border-left:3px solid #2563eb;padding:3px 6px;margin-bottom:3px;border-radius:3px;font-size:12px;color:#4a5568;"><strong style="color:#2563eb;">[引用消息]</strong></div>`
 
 		case "inline_keyboard":
 			buttonsVal := params["buttons"]
@@ -355,18 +386,18 @@ func CQToHTMLWithGroup(msg string, groupID int64) string {
 				return ""
 			}
 			var rowsHTML strings.Builder
-			rowsHTML.WriteString(`<div style="margin-top: 6px; display: flex; flex-direction: column; gap: 4px;">`)
+			rowsHTML.WriteString(`<div style="margin-top:3px;display:flex;flex-direction:column;gap:3px;">`)
 			rows := strings.Split(buttonsVal, "//")
 			for _, row := range rows {
 				if strings.TrimSpace(row) == "" {
 					continue
 				}
-				rowsHTML.WriteString(`<div style="display: flex; flex-wrap: wrap; gap: 6px;">`)
+				rowsHTML.WriteString(`<div style="display:flex;flex-wrap:wrap;gap:4px;">`)
 				for _, btn := range strings.Split(row, "|") {
 					btn = strings.TrimSpace(btn)
 					if btn != "" {
 						rowsHTML.WriteString(fmt.Sprintf(
-							`<span style="display: inline-block; background-color: #eff6ff; color: #2563eb; border: 1px solid #bfdbfe; border-radius: 4px; padding: 2px 8px; font-size: 12px; font-weight: 500;">%s</span>`,
+							`<span style="display:inline-block;background:#eff6ff;color:#2563eb;border:1px solid #bfdbfe;border-radius:3px;padding:1px 6px;font-size:11px;font-weight:500;">%s</span>`,
 							html.EscapeString(btn),
 						))
 					}
@@ -387,6 +418,9 @@ func CQToHTMLWithGroup(msg string, groupID int64) string {
 			return fmt.Sprintf("[%s消息]", cqType)
 		}
 	})
+	res = strings.ReplaceAll(res, "&#91;", "[")
+	res = strings.ReplaceAll(res, "&#93;", "]")
+	res = strings.ReplaceAll(res, "&#44;", ",")
 	res = regexp.MustCompile(`(</b>)  +`).ReplaceAllString(res, "$1 ")
 	return res
 }
@@ -891,8 +925,28 @@ func FormatCQAtText(msg string, groupID int64) string {
 		return sb.String()
 	})
 
+	// 格式化 reply 引用消息为友好纯文本标记
+	reReply := regexp.MustCompile(`\[CQ:reply,id=([-\d]+)[^\]]*\] ?`)
+	msg = reReply.ReplaceAllStringFunc(msg, func(cq string) string {
+		matches := reReply.FindStringSubmatch(cq)
+		if len(matches) < 2 {
+			return ""
+		}
+		replyIDStr := matches[1]
+		var replyInfo *ReplyMsgInfo
+		if GlobalQQSender != nil {
+			if replyID, err := strconv.ParseInt(replyIDStr, 10, 64); err == nil && replyID != 0 {
+				replyInfo, _ = GlobalQQSender.GetReplyMsg(replyID, groupID)
+			}
+		}
+		if replyInfo != nil && replyInfo.SenderName != "" {
+			return fmt.Sprintf("「引用 @%s: %s」\n", UnescapeCQ(replyInfo.SenderName), UnescapeCQ(replyInfo.Summary))
+		}
+		return "「引用消息」\n"
+	})
+
 	re := regexp.MustCompile(`\[CQ:at,qq=([^,\]]+)(?:,[^\]]*)?\] ?`)
-	return re.ReplaceAllStringFunc(msg, func(cq string) string {
+	msg = re.ReplaceAllStringFunc(msg, func(cq string) string {
 		matches := re.FindStringSubmatch(cq)
 		if len(matches) < 2 {
 			return cq
@@ -911,5 +965,7 @@ func FormatCQAtText(msg string, groupID int64) string {
 		}
 		return fmt.Sprintf("@%s ", displayName)
 	})
+
+	return UnescapeCQ(msg)
 }
 
