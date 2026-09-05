@@ -6,32 +6,37 @@ import (
 	"fmt"
 	"html"
 	"io"
+	"log"
 	"net/http"
 	"regexp"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
-func imageURLToBase64(imgURL string) (string, error) {
-	client := &http.Client{Timeout: 10 * time.Second}
+var imageCache sync.Map // key: file or URL, value: yunhuURL
+
+func downloadImageData(imgURL string) ([]byte, string, error) {
+	client := &http.Client{Timeout: 15 * time.Second}
 	req, err := http.NewRequest("GET", imgURL, nil)
 	if err != nil {
-		return "", err
+		return nil, "", err
 	}
 	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
 	resp, err := client.Do(req)
 	if err != nil {
-		return "", err
+		return nil, "", err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("http status %d", resp.StatusCode)
+		return nil, "", fmt.Errorf("http status %d", resp.StatusCode)
 	}
 
 	data, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return "", err
+		return nil, "", err
 	}
 
 	contentType := resp.Header.Get("Content-Type")
@@ -47,8 +52,57 @@ func imageURLToBase64(imgURL string) (string, error) {
 		}
 	}
 
-	base64Str := base64.StdEncoding.EncodeToString(data)
-	return fmt.Sprintf("data:%s;base64,%s", contentType, base64Str), nil
+	return data, contentType, nil
+}
+
+// ProcessCQImage downloads QQ image, uploads to Yunhu image CDN, and returns <img> tag to avoid payload size limit.
+func ProcessCQImage(imgURL, fileVal string) string {
+	if imgURL == "" && fileVal != "" {
+		if strings.HasPrefix(fileVal, "http://") || strings.HasPrefix(fileVal, "https://") {
+			imgURL = fileVal
+		}
+	}
+	if imgURL == "" {
+		return "[图片]"
+	}
+	imgURL = html.UnescapeString(imgURL)
+
+	cacheKey := fileVal
+	if cacheKey == "" {
+		cacheKey = imgURL
+	}
+	if val, ok := imageCache.Load(cacheKey); ok {
+		if cachedURL, ok := val.(string); ok && cachedURL != "" {
+			return fmt.Sprintf(`<br><img src="%s" style="max-width: 100%%; margin: 5px 0; border-radius: 4px;"><br>`, cachedURL)
+		}
+	}
+
+	// 1. 下载图片二进制
+	data, contentType, err := downloadImageData(imgURL)
+	if err != nil {
+		log.Printf("[CQ Image] 下载图片失败: %v (URL: %s)", err, imgURL)
+		return fmt.Sprintf(`<br><img src="%s" style="max-width: 100%%; margin: 5px 0; border-radius: 4px;"><br>`, html.EscapeString(imgURL))
+	}
+
+	// 2. 优先上传到云湖官方图床，解决防盗链并规避 Base64 导致消息内容过长 (code 1002) 的问题
+	if GlobalYHSender != nil {
+		yhURL, err := GlobalYHSender.UploadImage(data, fileVal)
+		if err == nil && yhURL != "" {
+			imageCache.Store(cacheKey, yhURL)
+			return fmt.Sprintf(`<br><img src="%s" style="max-width: 100%%; margin: 5px 0; border-radius: 4px;"><br>`, yhURL)
+		}
+		log.Printf("[CQ Image] 上传到云湖失败: %v，准备降级处理", err)
+	}
+
+	// 3. 降级处理：小图片 (<= 25KB) 在上传失败时退回到 base64
+	if len(data) <= 25*1024 {
+		base64Str := base64.StdEncoding.EncodeToString(data)
+		base64Src := fmt.Sprintf("data:%s;base64,%s", contentType, base64Str)
+		return fmt.Sprintf(`<br><img src="%s" style="max-width: 100%%; margin: 5px 0; border-radius: 4px;"><br>`, base64Src)
+	}
+
+	// 4. 大图降级直接展示外链，防止几百 KB 的 base64 撑爆云湖载荷
+	return fmt.Sprintf(`<br><img src="%s" style="max-width: 100%%; margin: 5px 0; border-radius: 4px;"><br>`, html.EscapeString(imgURL))
 }
 
 // parseCQParams parses parameter key-value pairs from a CQ code parameter string.
@@ -84,8 +138,13 @@ func parseCQParams(paramsStr string) map[string]string {
 
 // CQToHTML converts OneBot CQ codes in a message string to HTML elements for display in Yunhu HTML messages.
 func CQToHTML(msg string) string {
+	return CQToHTMLWithGroup(msg, 0)
+}
+
+// CQToHTMLWithGroup converts OneBot CQ codes in a message string to HTML elements, resolving @ mentions with group member nicknames/cards.
+func CQToHTMLWithGroup(msg string, groupID int64) string {
 	re := regexp.MustCompile(`\[CQ:([a-zA-Z0-9_-]+)(?:,([^\]]*))?\]`)
-	return re.ReplaceAllStringFunc(msg, func(cq string) string {
+	res := re.ReplaceAllStringFunc(msg, func(cq string) string {
 		matches := re.FindStringSubmatch(cq)
 		if len(matches) < 2 {
 			return cq
@@ -100,28 +159,23 @@ func CQToHTML(msg string) string {
 		switch cqType {
 		case "image":
 			imgURL := params["url"]
-			if imgURL == "" {
-				fileVal := params["file"]
-				if strings.HasPrefix(fileVal, "http://") || strings.HasPrefix(fileVal, "https://") {
-					imgURL = fileVal
-				}
-			}
-			if imgURL != "" {
-				imgURL = html.UnescapeString(imgURL)
-				src := imgURL
-				if base64Src, err := imageURLToBase64(imgURL); err == nil && base64Src != "" {
-					src = base64Src
-				}
-				return fmt.Sprintf(`<br><img src="%s" style="max-width: 100%%; margin: 5px 0; border-radius: 4px;"><br>`, src)
-			}
-			return "[图片]"
+			fileVal := params["file"]
+			return ProcessCQImage(imgURL, fileVal)
 
 		case "at":
 			qq := params["qq"]
 			if qq == "all" {
 				return "@全体成员"
 			}
-			return fmt.Sprintf("<b>@%s</b> ", qq)
+			displayName := qq
+			if GlobalQQSender != nil {
+				if uid, err := strconv.ParseInt(qq, 10, 64); err == nil && uid != 0 {
+					if name := GlobalQQSender.GetGroupMemberName(groupID, uid); name != "" {
+						displayName = name
+					}
+				}
+			}
+			return fmt.Sprintf("<b>@%s</b> ", html.EscapeString(displayName))
 
 		case "face":
 			return "[表情]"
@@ -146,10 +200,46 @@ func CQToHTML(msg string) string {
 		case "reply":
 			return ""
 
+		case "inline_keyboard":
+			buttonsVal := params["buttons"]
+			if buttonsVal == "" {
+				return ""
+			}
+			var rowsHTML strings.Builder
+			rowsHTML.WriteString(`<div style="margin-top: 6px; display: flex; flex-direction: column; gap: 4px;">`)
+			rows := strings.Split(buttonsVal, "//")
+			for _, row := range rows {
+				if strings.TrimSpace(row) == "" {
+					continue
+				}
+				rowsHTML.WriteString(`<div style="display: flex; flex-wrap: wrap; gap: 6px;">`)
+				for _, btn := range strings.Split(row, "|") {
+					btn = strings.TrimSpace(btn)
+					if btn != "" {
+						rowsHTML.WriteString(fmt.Sprintf(
+							`<span style="display: inline-block; background-color: #eff6ff; color: #2563eb; border: 1px solid #bfdbfe; border-radius: 4px; padding: 2px 8px; font-size: 12px; font-weight: 500;">%s</span>`,
+							html.EscapeString(btn),
+						))
+					}
+				}
+				rowsHTML.WriteString(`</div>`)
+			}
+			rowsHTML.WriteString(`</div>`)
+			return rowsHTML.String()
+
+		case "markdown":
+			contentVal := params["content"]
+			if contentVal != "" {
+				return CQToHTMLWithGroup(contentVal, groupID)
+			}
+			return ""
+
 		default:
 			return fmt.Sprintf("[%s消息]", cqType)
 		}
 	})
+	res = regexp.MustCompile(`(</b>)  +`).ReplaceAllString(res, "$1 ")
+	return res
 }
 
 // ExtractVideoURL extracts the video HTTP/HTTPS URL from a CQ:video code string.
@@ -624,3 +714,53 @@ func ExtractForwardID(msg string) string {
 	}
 	return ""
 }
+
+// FormatCQAtText replaces [CQ:at,qq=xxx] in plain text messages with @MemberName for clearer readability.
+func FormatCQAtText(msg string, groupID int64) string {
+	// 格式化 inline_keyboard 按钮为友好纯文本标记
+	reKeyboard := regexp.MustCompile(`\[CQ:inline_keyboard,buttons=([^\]]+)\]`)
+	msg = reKeyboard.ReplaceAllStringFunc(msg, func(cq string) string {
+		matches := reKeyboard.FindStringSubmatch(cq)
+		if len(matches) < 2 {
+			return ""
+		}
+		rawRows := strings.Split(matches[1], "//")
+		var sb strings.Builder
+		for _, r := range rawRows {
+			btns := strings.Split(r, "|")
+			var validBtns []string
+			for _, b := range btns {
+				b = strings.TrimSpace(b)
+				if b != "" {
+					validBtns = append(validBtns, fmt.Sprintf("[%s]", b))
+				}
+			}
+			if len(validBtns) > 0 {
+				sb.WriteString("\n🔘 " + strings.Join(validBtns, " "))
+			}
+		}
+		return sb.String()
+	})
+
+	re := regexp.MustCompile(`\[CQ:at,qq=([^,\]]+)(?:,[^\]]*)?\] ?`)
+	return re.ReplaceAllStringFunc(msg, func(cq string) string {
+		matches := re.FindStringSubmatch(cq)
+		if len(matches) < 2 {
+			return cq
+		}
+		qq := strings.TrimSpace(matches[1])
+		if qq == "all" {
+			return "@全体成员 "
+		}
+		displayName := qq
+		if GlobalQQSender != nil {
+			if uid, err := strconv.ParseInt(qq, 10, 64); err == nil && uid != 0 {
+				if name := GlobalQQSender.GetGroupMemberName(groupID, uid); name != "" {
+					displayName = name
+				}
+			}
+		}
+		return fmt.Sprintf("@%s ", displayName)
+	})
+}
+

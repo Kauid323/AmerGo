@@ -3,6 +3,7 @@ package model
 import (
 	"encoding/json"
 	"fmt"
+	"regexp"
 	"strings"
 )
 
@@ -94,30 +95,136 @@ func (e *OneBotEvent) GetSenderUserID() int64 {
 	return e.UserID.Int64()
 }
 
-func (e *OneBotEvent) GetRawMessage() string {
-	if e.RawMessage != "" {
-		return e.RawMessage
-	}
-	if len(e.Message) == 0 {
+// ParseMarkdownSegment parses QQ Bot markdown message content into clean text and OneBot CQ codes.
+func ParseMarkdownSegment(content string) string {
+	if content == "" {
 		return ""
 	}
 
+	// 1. 过滤版本元数据，例如 [](version...) 或 [](http...)
+	reMeta := regexp.MustCompile(`\[\s*\]\([^\)]*\)`)
+	res := reMeta.ReplaceAllString(content, "")
+
+	// 2. 转换 markdown 图片: ![#150px #84px](url) -> [CQ:image,url=url]
+	reImg := regexp.MustCompile(`!\[[^\]]*\]\((https?://[^\s\)]+)\)`)
+	res = reImg.ReplaceAllString(res, "\n[CQ:image,url=$1]\n")
+
+	// 3. 转换 mention: [@Amer](mqqapi://markdown/mention?at_type=1&at_tinyid=3218936228) -> @Amer
+	reMention := regexp.MustCompile(`\[@([^\s\]]+)\]\(mqqapi://markdown/mention\?[^\)]*\)`)
+	res = reMention.ReplaceAllString(res, "@$1 ")
+
+	// 4. 转换内部命令或操作跳转: [开关入群欢迎](mqqapi://aio/inlinecmd?command=...) -> [开关入群欢迎]
+	reCmd := regexp.MustCompile(`\[([^\]]+)\]\(mqqapi://[^\)]*\)`)
+	res = reCmd.ReplaceAllString(res, "[$1]")
+
+	// 5. 规整多余连续空行
+	reNewlines := regexp.MustCompile(`\n{3,}`)
+	res = reNewlines.ReplaceAllString(res, "\n\n")
+
+	return strings.TrimSpace(res)
+}
+
+// ParseInlineKeyboardButtons extracts buttons text from inline_keyboard payload.
+func ParseInlineKeyboardButtons(data map[string]interface{}) [][]string {
+	var rowsList [][]string
+	rowsVal, ok := data["rows"]
+	if !ok {
+		return rowsList
+	}
+
+	rowsArr, ok := rowsVal.([]interface{})
+	if !ok {
+		return rowsList
+	}
+
+	for _, r := range rowsArr {
+		rowMap, ok := r.(map[string]interface{})
+		if !ok {
+			continue
+		}
+		btnVal, ok := rowMap["buttons"]
+		if !ok {
+			continue
+		}
+		btnArr, ok := btnVal.([]interface{})
+		if !ok {
+			continue
+		}
+
+		var rowButtons []string
+		for _, b := range btnArr {
+			bMap, ok := b.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			label, _ := bMap["label"].(string)
+			if label == "" {
+				label, _ = bMap["visited_label"].(string)
+			}
+			if label == "" {
+				label, _ = bMap["data"].(string)
+			}
+			label = strings.TrimSpace(label)
+			if label != "" {
+				rowButtons = append(rowButtons, label)
+			}
+		}
+		if len(rowButtons) > 0 {
+			rowsList = append(rowsList, rowButtons)
+		}
+	}
+	return rowsList
+}
+
+// ParseInlineKeyboardSegment formats inline_keyboard buttons into CQ code for downstream rendering.
+func ParseInlineKeyboardSegment(data map[string]interface{}) string {
+	rowsList := ParseInlineKeyboardButtons(data)
+	if len(rowsList) == 0 {
+		return ""
+	}
+
+	var rowStrs []string
+	for _, row := range rowsList {
+		rowStrs = append(rowStrs, strings.Join(row, "|"))
+	}
+	encoded := strings.Join(rowStrs, "//")
+	return fmt.Sprintf("[CQ:inline_keyboard,buttons=%s]", encoded)
+}
+
+func (e *OneBotEvent) GetRawMessage() string {
+	// 如果 raw_message 包含没有具体参数的 [CQ:markdown] 或 [CQ:inline_keyboard]，说明被上报层压缩截断，必须优先从 e.Message 深度解析！
+	needsDeepParse := false
+	if strings.Contains(e.RawMessage, "[CQ:markdown]") ||
+		strings.Contains(e.RawMessage, "[CQ:inline_keyboard]") ||
+		strings.Contains(e.RawMessage, "[CQ:markdown,") ||
+		strings.Contains(e.RawMessage, "[CQ:inline_keyboard,") {
+		needsDeepParse = true
+	}
+
+	if e.RawMessage != "" && !needsDeepParse {
+		return e.RawMessage
+	}
+	if len(e.Message) == 0 {
+		return e.RawMessage
+	}
+
 	var strMsg string
-	if err := json.Unmarshal(e.Message, &strMsg); err == nil {
+	if err := json.Unmarshal(e.Message, &strMsg); err == nil && strMsg != "" {
 		return strMsg
 	}
 
 	var msgSegments []map[string]interface{}
-	if err := json.Unmarshal(e.Message, &msgSegments); err == nil {
+	if err := json.Unmarshal(e.Message, &msgSegments); err == nil && len(msgSegments) > 0 {
 		var sb strings.Builder
 		for _, seg := range msgSegments {
 			segType, _ := seg["type"].(string)
 			data, _ := seg["data"].(map[string]interface{})
-			if segType == "text" {
+			switch segType {
+			case "text":
 				if text, ok := data["text"].(string); ok {
 					sb.WriteString(text)
 				}
-			} else if segType == "image" {
+			case "image":
 				file, _ := data["file"].(string)
 				url, _ := data["url"].(string)
 				if url != "" && file != "" {
@@ -127,16 +234,16 @@ func (e *OneBotEvent) GetRawMessage() string {
 				} else if file != "" {
 					sb.WriteString(fmt.Sprintf("[CQ:image,file=%s]", file))
 				}
-			} else if segType == "at" {
+			case "at":
 				qq, _ := data["qq"].(string)
 				sb.WriteString(fmt.Sprintf("[CQ:at,qq=%s]", qq))
-			} else if segType == "face" {
+			case "face":
 				id, _ := data["id"].(string)
 				sb.WriteString(fmt.Sprintf("[CQ:face,id=%s]", id))
-			} else if segType == "forward" {
+			case "forward":
 				id, _ := data["id"].(string)
 				sb.WriteString(fmt.Sprintf("[CQ:forward,id=%s]", id))
-			} else if segType == "record" {
+			case "record":
 				file, _ := data["file"].(string)
 				url, _ := data["url"].(string)
 				if url != "" && file != "" {
@@ -146,7 +253,7 @@ func (e *OneBotEvent) GetRawMessage() string {
 				} else if file != "" {
 					sb.WriteString(fmt.Sprintf("[CQ:record,file=%s]", file))
 				}
-			} else if segType == "video" {
+			case "video":
 				file, _ := data["file"].(string)
 				url, _ := data["url"].(string)
 				if url != "" && file != "" {
@@ -156,12 +263,29 @@ func (e *OneBotEvent) GetRawMessage() string {
 				} else if file != "" {
 					sb.WriteString(fmt.Sprintf("[CQ:video,file=%s]", file))
 				}
+			case "markdown":
+				if content, ok := data["content"].(string); ok {
+					parsed := ParseMarkdownSegment(content)
+					if sb.Len() > 0 && !strings.HasSuffix(sb.String(), "\n") {
+						sb.WriteString("\n")
+					}
+					sb.WriteString(parsed)
+				}
+			case "inline_keyboard":
+				parsed := ParseInlineKeyboardSegment(data)
+				if sb.Len() > 0 && !strings.HasSuffix(sb.String(), "\n") {
+					sb.WriteString("\n")
+				}
+				sb.WriteString(parsed)
 			}
 		}
-		return sb.String()
+		result := strings.TrimSpace(sb.String())
+		if result != "" {
+			return result
+		}
 	}
 
-	return string(e.Message)
+	return e.RawMessage
 }
 
 type OneBotAction struct {
@@ -181,4 +305,17 @@ type OneBotResponse struct {
 type OneBotGroupInfo struct {
 	GroupID   FlexibleInt64 `json:"group_id"`
 	GroupName string        `json:"group_name"`
+}
+
+type OneBotMemberInfo struct {
+	GroupID  FlexibleInt64 `json:"group_id"`
+	UserID   FlexibleInt64 `json:"user_id"`
+	Nickname string        `json:"nickname"`
+	Card     string        `json:"card"`
+	Role     string        `json:"role"`
+}
+
+type OneBotStrangerInfo struct {
+	UserID   FlexibleInt64 `json:"user_id"`
+	Nickname string        `json:"nickname"`
 }

@@ -2,11 +2,16 @@ package yunhu
 
 import (
 	"bytes"
+	"crypto/md5"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
+	"mime/multipart"
 	"net/http"
+	"net/textproto"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -229,3 +234,103 @@ func (c *Client) SetBoard(recvID, recvType, content string) error {
 func (c *Client) GetGroupName(groupID string) string {
 	return fmt.Sprintf("云湖群-%s", groupID)
 }
+
+var ImageUploadBaseURL = "https://chat-go.jwzhd.com"
+
+// UploadImage uploads image binary data to Yunhu official image upload API and returns the public CDN URL.
+func (c *Client) UploadImage(imgData []byte, filename string) (string, error) {
+	token := config.AppConfig.YH.Token
+	if token == "" {
+		return "", fmt.Errorf("云湖机器人 token 未配置")
+	}
+
+	// 1. 推断扩展名与 MIME 类型（云湖要求 jpeg 必须使用 .jpg 后缀）
+	ext := ".jpg"
+	mimeType := "image/jpeg"
+	if len(imgData) >= 8 {
+		if imgData[0] == 0xff && imgData[1] == 0xd8 && imgData[2] == 0xff {
+			ext = ".jpg"
+			mimeType = "image/jpeg"
+		} else if imgData[0] == 0x89 && imgData[1] == 'P' && imgData[2] == 'N' && imgData[3] == 'G' {
+			ext = ".png"
+			mimeType = "image/png"
+		} else if string(imgData[0:6]) == "GIF87a" || string(imgData[0:6]) == "GIF89a" {
+			ext = ".gif"
+			mimeType = "image/gif"
+		} else if len(imgData) >= 12 && string(imgData[0:4]) == "RIFF" && string(imgData[8:12]) == "WEBP" {
+			ext = ".webp"
+			mimeType = "image/webp"
+		}
+	}
+
+	hash := md5.Sum(imgData)
+	imageHash := hex.EncodeToString(hash[:])
+	targetFilename := imageHash + ext
+	if filename != "" && strings.Contains(filename, ".") {
+		origExt := strings.ToLower(filepath.Ext(filename))
+		if origExt == ".jpeg" {
+			origExt = ".jpg"
+		}
+		if origExt == ".jpg" || origExt == ".png" || origExt == ".gif" || origExt == ".webp" {
+			targetFilename = imageHash + origExt
+			ext = origExt
+		}
+	}
+
+	apiURL := fmt.Sprintf("%s/open-apis/v1/image/upload?token=%s", ImageUploadBaseURL, token)
+
+	body := &bytes.Buffer{}
+	writer := multipart.NewWriter(body)
+	h := make(textproto.MIMEHeader)
+	h.Set("Content-Disposition", fmt.Sprintf(`form-data; name="image"; filename="%s"`, targetFilename))
+	h.Set("Content-Type", mimeType)
+
+	part, err := writer.CreatePart(h)
+	if err != nil {
+		return "", fmt.Errorf("创建表单分块失败: %v", err)
+	}
+	if _, err := part.Write(imgData); err != nil {
+		return "", fmt.Errorf("写入图片数据失败: %v", err)
+	}
+	if err := writer.Close(); err != nil {
+		return "", fmt.Errorf("关闭表单写入器失败: %v", err)
+	}
+
+	req, err := http.NewRequest("POST", apiURL, body)
+	if err != nil {
+		return "", fmt.Errorf("创建上传请求失败: %v", err)
+	}
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+
+	uploadClient := &http.Client{Timeout: 30 * time.Second}
+	resp, err := uploadClient.Do(req)
+	if err != nil {
+		log.Printf("[Yunhu Upload Error] 上传图片到云湖网络错误: %v", err)
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	respBytes, _ := io.ReadAll(resp.Body)
+	log.Printf("[Yunhu Upload] 上传图片响应: %s", string(respBytes))
+
+	var res struct {
+		Code int    `json:"code"`
+		Msg  string `json:"msg"`
+		Data struct {
+			ImageKey string `json:"imageKey"`
+		} `json:"data"`
+	}
+
+	if err := json.Unmarshal(respBytes, &res); err != nil {
+		return "", fmt.Errorf("解析云湖图片上传响应失败: %v", err)
+	}
+
+	if res.Code != 1 && !strings.EqualFold(res.Msg, "success") {
+		return "", fmt.Errorf("云湖图片上传接口返回失败: %s (code: %d)", res.Msg, res.Code)
+	}
+
+	yunhuImgURL := fmt.Sprintf("https://chat-img.jwznb.com/%s%s", imageHash, ext)
+	log.Printf("[Yunhu Upload Success] 图片成功上传至云湖，访问地址: %s", yunhuImgURL)
+	return yunhuImgURL, nil
+}
+

@@ -84,10 +84,25 @@ func handleQQMessage(event model.OneBotEvent) {
 		}
 
 		groupName := GlobalOneBotServer.GetGroupName(groupID)
-		cleanedName := message.ReplaceBlockedWords(event.Sender.Nickname)
+
+		// 自动更新发言人名称到本地缓存并优先获取群名片
+		senderName := strings.TrimSpace(event.Sender.Card)
+		if senderName == "" {
+			senderName = strings.TrimSpace(event.Sender.Nickname)
+		}
+		if senderName != "" {
+			GlobalOneBotServer.UpdateMemberNameCache(groupID, senderUserID, senderName)
+		} else {
+			senderName = GlobalOneBotServer.GetGroupMemberName(groupID, senderUserID)
+		}
+		if senderName == "" {
+			senderName = senderUserIDStr
+		}
+		cleanedName := message.ReplaceBlockedWords(senderName)
 		cleanedMsg := message.ReplaceBlockedWords(rawMsg)
-		htmlMsg := message.CQToHTML(cleanedMsg)
+		htmlMsg := message.CQToHTMLWithGroup(cleanedMsg, groupID)
 		cleanedMsgHTML := strings.ReplaceAll(htmlMsg, "\n", "<br>")
+		displayCleanedMsg := message.FormatCQAtText(cleanedMsg, groupID)
 
 		avatarURL := fmt.Sprintf("http://q1.qlogo.cn/g?b=qq&nk=%d&s=100", senderUserID)
 
@@ -103,9 +118,9 @@ func handleQQMessage(event model.OneBotEvent) {
 			if videoURL != "" {
 				surfaceID := fmt.Sprintf("video_%s_%d", event.MessageID.String(), time.Now().UnixNano())
 				a2uiJSON := message.BuildVideoA2UI(surfaceID, groupName, groupIDStr, cleanedName, senderUserIDStr, videoURL, event.MessageID.String())
-				message.SendA2UIToAllBindings("QQ", groupIDStr, cleanedMsg, senderUserIDStr, cleanedName, a2uiJSON, event.MessageID.String())
+				message.SendA2UIToAllBindings("QQ", groupIDStr, displayCleanedMsg, senderUserIDStr, cleanedName, a2uiJSON, event.MessageID.String())
 			} else {
-				message.SendToAllBindings("QQ", groupIDStr, "html", cleanedMsg, senderUserIDStr, cleanedName, contentHTML, event.MessageID.String())
+				message.SendToAllBindings("QQ", groupIDStr, "html", displayCleanedMsg, senderUserIDStr, cleanedName, contentHTML, event.MessageID.String())
 			}
 		} else if strings.Contains(rawMsg, "[CQ:record") {
 			audioURL, fileVal := message.ExtractAudioURL(rawMsg)
@@ -113,26 +128,26 @@ func handleQQMessage(event model.OneBotEvent) {
 				audioPlayURI := message.FetchAudioDataURI(audioURL, fileVal)
 				surfaceID := fmt.Sprintf("audio_%s_%d", event.MessageID.String(), time.Now().UnixNano())
 				a2uiJSON := message.BuildAudioA2UI(surfaceID, groupName, groupIDStr, cleanedName, senderUserIDStr, audioPlayURI, event.MessageID.String())
-				message.SendA2UIToAllBindings("QQ", groupIDStr, cleanedMsg, senderUserIDStr, cleanedName, a2uiJSON, event.MessageID.String())
+				message.SendA2UIToAllBindings("QQ", groupIDStr, displayCleanedMsg, senderUserIDStr, cleanedName, a2uiJSON, event.MessageID.String())
 			} else {
-				message.SendToAllBindings("QQ", groupIDStr, "html", cleanedMsg, senderUserIDStr, cleanedName, contentHTML, event.MessageID.String())
+				message.SendToAllBindings("QQ", groupIDStr, "html", displayCleanedMsg, senderUserIDStr, cleanedName, contentHTML, event.MessageID.String())
 			}
 		} else if strings.Contains(rawMsg, "[CQ:forward") {
 			forwardID := message.ExtractForwardID(rawMsg)
 			if forwardID != "" {
-				forwardHTML := FetchForwardMsgHTML(forwardID, groupName, cleanedName, senderUserIDStr)
+				forwardHTML := FetchForwardMsgHTML(forwardID, groupName, cleanedName, senderUserIDStr, groupID)
 				if forwardHTML != "" {
-					message.SendToAllBindings("QQ", groupIDStr, "html", cleanedMsg, senderUserIDStr, cleanedName, forwardHTML, event.MessageID.String())
+					message.SendToAllBindings("QQ", groupIDStr, "html", displayCleanedMsg, senderUserIDStr, cleanedName, forwardHTML, event.MessageID.String())
 				} else {
 					fallbackHTML := BuildForwardFallbackHTML(groupName, cleanedName, senderUserIDStr)
-					message.SendToAllBindings("QQ", groupIDStr, "html", cleanedMsg, senderUserIDStr, cleanedName, fallbackHTML, event.MessageID.String())
+					message.SendToAllBindings("QQ", groupIDStr, "html", displayCleanedMsg, senderUserIDStr, cleanedName, fallbackHTML, event.MessageID.String())
 				}
 			} else {
 				fallbackHTML := BuildForwardFallbackHTML(groupName, cleanedName, senderUserIDStr)
-				message.SendToAllBindings("QQ", groupIDStr, "html", cleanedMsg, senderUserIDStr, cleanedName, fallbackHTML, event.MessageID.String())
+				message.SendToAllBindings("QQ", groupIDStr, "html", displayCleanedMsg, senderUserIDStr, cleanedName, fallbackHTML, event.MessageID.String())
 			}
 		} else {
-			message.SendToAllBindings("QQ", groupIDStr, "html", cleanedMsg, senderUserIDStr, cleanedName, contentHTML, event.MessageID.String())
+			message.SendToAllBindings("QQ", groupIDStr, "html", displayCleanedMsg, senderUserIDStr, cleanedName, contentHTML, event.MessageID.String())
 		}
 	}
 }
@@ -140,6 +155,7 @@ func handleQQMessage(event model.OneBotEvent) {
 type ForwardMessageNode struct {
 	Sender struct {
 		Nickname string              `json:"nickname"`
+		Card     string              `json:"card"`
 		UserID   model.FlexibleInt64 `json:"user_id"`
 	} `json:"sender"`
 	Time    int64       `json:"time"`
@@ -151,12 +167,12 @@ type ForwardMsgData struct {
 	Messages []ForwardMessageNode `json:"messages"`
 }
 
-func parseNodeContent(content interface{}) string {
+func parseNodeContent(content interface{}, groupID int64) string {
 	if content == nil {
 		return ""
 	}
 	if contentStr, ok := content.(string); ok {
-		return message.CQToHTML(contentStr)
+		return message.CQToHTMLWithGroup(contentStr, groupID)
 	}
 	if contentArr, ok := content.([]interface{}); ok {
 		var sb strings.Builder
@@ -171,17 +187,17 @@ func parseNodeContent(content interface{}) string {
 					}
 				case "image":
 					imgURL, _ := dataMap["url"].(string)
-					if imgURL == "" {
-						imgURL, _ = dataMap["file"].(string)
-					}
-					if imgURL != "" {
-						sb.WriteString(fmt.Sprintf(`<br><img src="%s" style="max-width: 100%%; margin: 5px 0; border-radius: 4px;"><br>`, imgURL))
-					} else {
-						sb.WriteString("[图片]")
-					}
+					fileVal, _ := dataMap["file"].(string)
+					sb.WriteString(message.ProcessCQImage(imgURL, fileVal))
 				case "at":
 					qqVal, _ := dataMap["qq"].(string)
-					sb.WriteString(fmt.Sprintf("<b>@%s</b> ", qqVal))
+					displayName := qqVal
+					if targetUID, err := strconv.ParseInt(qqVal, 10, 64); err == nil && targetUID != 0 {
+						if name := GlobalOneBotServer.GetGroupMemberName(groupID, targetUID); name != "" {
+							displayName = name
+						}
+					}
+					sb.WriteString(fmt.Sprintf("<b>@%s</b> ", html.EscapeString(displayName)))
 				case "video":
 					videoURL, _ := dataMap["url"].(string)
 					if videoURL == "" {
@@ -192,6 +208,14 @@ func parseNodeContent(content interface{}) string {
 					} else {
 						sb.WriteString("[视频消息]")
 					}
+				case "markdown":
+					if content, ok := dataMap["content"].(string); ok {
+						parsed := model.ParseMarkdownSegment(content)
+						sb.WriteString(message.CQToHTMLWithGroup(parsed, groupID))
+					}
+				case "inline_keyboard":
+					parsed := model.ParseInlineKeyboardSegment(dataMap)
+					sb.WriteString(message.CQToHTMLWithGroup(parsed, groupID))
 				default:
 					sb.WriteString(fmt.Sprintf("[%s消息]", elemType))
 				}
@@ -202,7 +226,7 @@ func parseNodeContent(content interface{}) string {
 	return ""
 }
 
-func FetchForwardMsgHTML(forwardID, groupName, senderName, senderIDStr string) string {
+func FetchForwardMsgHTML(forwardID, groupName, senderName, senderIDStr string, groupID int64) string {
 	respChan := make(chan model.OneBotResponse, 1)
 	go func() {
 		resp, err := GlobalOneBotServer.CallAPI("get_forward_msg", map[string]interface{}{
@@ -222,7 +246,13 @@ func FetchForwardMsgHTML(forwardID, groupName, senderName, senderIDStr string) s
 				avatarURL := fmt.Sprintf("http://q1.qlogo.cn/g?b=qq&nk=%s&s=100", senderIDStr)
 				var nodesSB strings.Builder
 				for _, node := range forwardData.Messages {
-					nodeSender := node.Sender.Nickname
+					nodeSender := strings.TrimSpace(node.Sender.Card)
+					if nodeSender == "" {
+						nodeSender = strings.TrimSpace(node.Sender.Nickname)
+					}
+					if nodeSender == "" && node.Sender.UserID.Int64() != 0 {
+						nodeSender = GlobalOneBotServer.GetGroupMemberName(groupID, node.Sender.UserID.Int64())
+					}
 					if nodeSender == "" {
 						nodeSender = "匿名"
 					}
@@ -234,7 +264,7 @@ func FetchForwardMsgHTML(forwardID, groupName, senderName, senderIDStr string) s
 					if nodeContent == nil {
 						nodeContent = node.Content
 					}
-					nodeContentHTML := parseNodeContent(nodeContent)
+					nodeContentHTML := parseNodeContent(nodeContent, groupID)
 
 					nodesSB.WriteString(fmt.Sprintf(
 						`<div style="background-color: #ffffff; padding: 6px 8px; border-radius: 4px; margin-bottom: 5px; border: 1px solid #e9ecef;"><span style="color: #007bff; font-weight: bold;">%s (%s):</span> <span style="color: #212529;">%s</span></div>`,

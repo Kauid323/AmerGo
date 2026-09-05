@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -20,6 +22,16 @@ var upgrader = websocket.Upgrader{
 	},
 }
 
+type memberCacheItem struct {
+	name     string
+	expireAt time.Time
+}
+
+type groupCacheItem struct {
+	name     string
+	expireAt time.Time
+}
+
 type OneBotServer struct {
 	conn         *websocket.Conn
 	connMu       sync.Mutex
@@ -28,10 +40,16 @@ type OneBotServer struct {
 	reqMu        sync.Mutex
 	SelfID       int64
 	SelfNickname string
+	memberCache  map[string]memberCacheItem
+	memberMu     sync.RWMutex
+	groupCache   map[int64]groupCacheItem
+	groupMu      sync.RWMutex
 }
 
 var GlobalOneBotServer = &OneBotServer{
-	pendingReq: make(map[string]chan model.OneBotResponse),
+	pendingReq:  make(map[string]chan model.OneBotResponse),
+	memberCache: make(map[string]memberCacheItem),
+	groupCache:  make(map[int64]groupCacheItem),
 }
 
 func (s *OneBotServer) WsHandler(c *gin.Context) {
@@ -131,6 +149,10 @@ func (s *OneBotServer) GetSelfInfo() (int64, string) {
 }
 
 func (s *OneBotServer) CallAPI(action string, params map[string]interface{}) (model.OneBotResponse, error) {
+	return s.CallAPIWithTimeout(action, params, 30*time.Second)
+}
+
+func (s *OneBotServer) CallAPIWithTimeout(action string, params map[string]interface{}, timeout time.Duration) (model.OneBotResponse, error) {
 	s.connMu.Lock()
 	conn := s.conn
 	s.connMu.Unlock()
@@ -177,7 +199,7 @@ func (s *OneBotServer) CallAPI(action string, params map[string]interface{}) (mo
 	select {
 	case resp := <-respChan:
 		return resp, nil
-	case <-time.After(30 * time.Second):
+	case <-time.After(timeout):
 		s.reqMu.Lock()
 		delete(s.pendingReq, echoID)
 		s.reqMu.Unlock()
@@ -216,16 +238,120 @@ func (s *OneBotServer) SendPrivateMsg(userID int64, message string) error {
 }
 
 func (s *OneBotServer) GetGroupName(groupID int64) string {
-	resp, err := s.CallAPI("get_group_info", map[string]interface{}{
+	s.groupMu.RLock()
+	if item, ok := s.groupCache[groupID]; ok && time.Now().Before(item.expireAt) {
+		s.groupMu.RUnlock()
+		return item.name
+	}
+	s.groupMu.RUnlock()
+
+	resp, err := s.CallAPIWithTimeout("get_group_info", map[string]interface{}{
 		"group_id": groupID,
-	})
+	}, 3*time.Second)
 	if err != nil {
 		return fmt.Sprintf("QQ群-%d", groupID)
 	}
 
 	var info model.OneBotGroupInfo
 	if err := json.Unmarshal(resp.Data, &info); err == nil && info.GroupName != "" {
+		s.groupMu.Lock()
+		s.groupCache[groupID] = groupCacheItem{
+			name:     info.GroupName,
+			expireAt: time.Now().Add(1 * time.Hour),
+		}
+		s.groupMu.Unlock()
 		return info.GroupName
 	}
 	return fmt.Sprintf("QQ群-%d", groupID)
+}
+
+func (s *OneBotServer) UpdateMemberNameCache(groupID int64, userID int64, name string) {
+	name = strings.TrimSpace(name)
+	if name == "" || userID == 0 {
+		return
+	}
+	s.memberMu.Lock()
+	defer s.memberMu.Unlock()
+	key := fmt.Sprintf("%d:%d", groupID, userID)
+	s.memberCache[key] = memberCacheItem{
+		name:     name,
+		expireAt: time.Now().Add(30 * time.Minute),
+	}
+}
+
+func (s *OneBotServer) GetGroupMemberName(groupID int64, userID int64) string {
+	if userID == 0 {
+		return ""
+	}
+
+	key := fmt.Sprintf("%d:%d", groupID, userID)
+	s.memberMu.RLock()
+	if item, ok := s.memberCache[key]; ok && time.Now().Before(item.expireAt) {
+		s.memberMu.RUnlock()
+		return item.name
+	}
+	s.memberMu.RUnlock()
+
+	defaultName := strconv.FormatInt(userID, 10)
+	if s.SelfID != 0 && userID == s.SelfID && s.SelfNickname != "" {
+		defaultName = s.SelfNickname
+	}
+
+	// 1. 若在群内 (groupID != 0)，优先调用 get_group_member_info 获取群名片/昵称
+	if groupID != 0 {
+		resp, err := s.CallAPIWithTimeout("get_group_member_info", map[string]interface{}{
+			"group_id": groupID,
+			"user_id":  userID,
+			"no_cache": false,
+		}, 3*time.Second)
+		if err == nil && resp.Status == "ok" {
+			var info model.OneBotMemberInfo
+			if err := json.Unmarshal(resp.Data, &info); err == nil {
+				targetName := strings.TrimSpace(info.Card)
+				if targetName == "" {
+					targetName = strings.TrimSpace(info.Nickname)
+				}
+				if targetName != "" {
+					s.memberMu.Lock()
+					s.memberCache[key] = memberCacheItem{
+						name:     targetName,
+						expireAt: time.Now().Add(30 * time.Minute),
+					}
+					s.memberMu.Unlock()
+					return targetName
+				}
+			}
+		}
+	}
+
+	// 2. 尝试获取陌生人/用户个人资料
+	resp, err := s.CallAPIWithTimeout("get_stranger_info", map[string]interface{}{
+		"user_id":  userID,
+		"no_cache": false,
+	}, 2*time.Second)
+	if err == nil && resp.Status == "ok" {
+		var info model.OneBotStrangerInfo
+		if err := json.Unmarshal(resp.Data, &info); err == nil {
+			targetName := strings.TrimSpace(info.Nickname)
+			if targetName != "" {
+				s.memberMu.Lock()
+				s.memberCache[key] = memberCacheItem{
+					name:     targetName,
+					expireAt: time.Now().Add(30 * time.Minute),
+				}
+				s.memberMu.Unlock()
+				return targetName
+			}
+		}
+	}
+
+	// 3. 查询失败时短期缓存 1 分钟，防止短时间内高频超时重发
+	s.memberMu.Lock()
+	s.memberCache[key] = memberCacheItem{
+		name:     defaultName,
+		expireAt: time.Now().Add(1 * time.Minute),
+	}
+	s.memberMu.Unlock()
+
+	return defaultName
 }

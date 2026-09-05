@@ -15,12 +15,14 @@ type QQMessageSender interface {
 	SendGroupForwardMsg(groupID int64, nodes []interface{}) error
 	GetGroupName(groupID int64) string
 	GetSelfInfo() (int64, string)
+	GetGroupMemberName(groupID int64, userID int64) string
 }
 
 type YunhuMessageSender interface {
 	Send(recvID, recvType, contentType, content string) (string, error)
 	SetBoard(recvID, recvType, content string) error
 	GetGroupName(groupID string) string
+	UploadImage(imgData []byte, filename string) (string, error)
 }
 
 var (
