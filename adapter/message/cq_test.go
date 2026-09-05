@@ -80,13 +80,66 @@ func TestCQImageWithYunhuUpload(t *testing.T) {
 		GlobalYHSender = nil
 	}()
 
-	// 先用缓存 key 预存或通过 ProcessCQImage 验证
-	imageCache.Store("test_image_file.jpg", mockURL)
-	cqMsg := "[CQ:image,file=test_image_file.jpg,url=http://example.com/test.jpg]"
+	// 1. 测试从缓存读取带分辨率尺寸的对象 (例如 1920x1080 -> 300x169)
+	imageCache.Store("test_scaled_image.jpg", imageCacheItem{url: mockURL, width: 1920, height: 1080})
+	cqMsg := "[CQ:image,file=test_scaled_image.jpg,url=http://example.com/test.jpg]"
 	got := CQToHTML(cqMsg)
-	expected := `<br><img src="https://chat-img.jwznb.com/c91bb351c5fc283dfd9c95d0ec5d6c88.jpg" style="max-width: 100%; margin: 5px 0; border-radius: 4px;"><br>`
+	expected := `<br><img src="https://chat-img.jwznb.com/c91bb351c5fc283dfd9c95d0ec5d6c88.jpg" width="300" height="169" style="width: 300px; height: 169px; max-width: 100%; object-fit: contain; border-radius: 4px; margin: 5px 0;"><br>`
 	if got != expected {
-		t.Errorf("CQToHTML image = %v, want %v", got, expected)
+		t.Errorf("CQToHTML image with dimensions = %v, want %v", got, expected)
+	}
+
+	// 2. 测试降级/无尺寸时的兼容性
+	imageCache.Store("test_image_file.jpg", mockURL)
+	cqMsg2 := "[CQ:image,file=test_image_file.jpg,url=http://example.com/test.jpg]"
+	got2 := CQToHTML(cqMsg2)
+	expected2 := `<br><img src="https://chat-img.jwznb.com/c91bb351c5fc283dfd9c95d0ec5d6c88.jpg" style="max-width: 300px; max-height: 320px; border-radius: 4px; margin: 5px 0; object-fit: contain;"><br>`
+	if got2 != expected2 {
+		t.Errorf("CQToHTML image fallback = %v, want %v", got2, expected2)
+	}
+}
+
+func TestCalculateDisplayDimensions(t *testing.T) {
+	tests := []struct {
+		name         string
+		w, h         int
+		wantW, wantH int
+	}{
+		{"16:9 大图等比例缩小", 1920, 1080, 300, 169},
+		{"竖向长图等比例缩小", 800, 1200, 213, 320},
+		{"正方形大图等比例缩小", 1000, 1000, 300, 300},
+		{"小图表情包不放大", 120, 120, 120, 120},
+		{"临界边界尺寸保持不变", 300, 320, 300, 320},
+		{"异常零尺寸", 0, 0, 0, 0},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			gotW, gotH := calculateDisplayDimensions(tc.w, tc.h)
+			if gotW != tc.wantW || gotH != tc.wantH {
+				t.Errorf("calculateDisplayDimensions(%d, %d) = (%d, %d), want (%d, %d)",
+					tc.w, tc.h, gotW, gotH, tc.wantW, tc.wantH)
+			}
+		})
+	}
+}
+
+func TestGetImageDimensionsWebP(t *testing.T) {
+	// 测试 VP8X 头部解析: canvas 800x600 -> width-1=799 (0x031f), height-1=599 (0x0257)
+	webpData := make([]byte, 30)
+	copy(webpData[0:4], "RIFF")
+	copy(webpData[8:12], "WEBP")
+	copy(webpData[12:16], "VP8X")
+	webpData[24] = 0x1f
+	webpData[25] = 0x03
+	webpData[26] = 0x00
+	webpData[27] = 0x57
+	webpData[28] = 0x02
+	webpData[29] = 0x00
+
+	w, h := getImageDimensions(webpData)
+	if w != 800 || h != 600 {
+		t.Errorf("getImageDimensions(webp) = (%d, %d), want (800, 600)", w, h)
 	}
 }
 
@@ -102,6 +155,7 @@ func TestInlineKeyboardRendering(t *testing.T) {
 		t.Errorf("expected buttons in text, got: %s", text)
 	}
 }
+
 
 
 

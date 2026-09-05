@@ -1,10 +1,16 @@
 package message
 
 import (
+	"bytes"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"html"
+	"image"
+	_ "image/gif"
+	_ "image/jpeg"
+	_ "image/png"
 	"io"
 	"log"
 	"net/http"
@@ -15,7 +21,105 @@ import (
 	"time"
 )
 
-var imageCache sync.Map // key: file or URL, value: yunhuURL
+var imageCache sync.Map // key: file or URL, value: imageCacheItem or string
+
+type imageCacheItem struct {
+	url    string
+	width  int
+	height int
+}
+
+const (
+	maxImageDisplayWidth  = 300.0
+	maxImageDisplayHeight = 320.0
+)
+
+// getImageDimensions parses width and height from image binary data (JPEG, PNG, GIF, WebP) without decoding full pixels.
+func getImageDimensions(data []byte) (int, int) {
+	if len(data) == 0 {
+		return 0, 0
+	}
+
+	// 1. 标准库解码 JPEG, PNG, GIF 配置
+	cfg, _, err := image.DecodeConfig(bytes.NewReader(data))
+	if err == nil && cfg.Width > 0 && cfg.Height > 0 {
+		return cfg.Width, cfg.Height
+	}
+
+	// 2. 解析 WebP 格式
+	if len(data) >= 30 && string(data[0:4]) == "RIFF" && string(data[8:12]) == "WEBP" {
+		format := string(data[12:16])
+		switch format {
+		case "VP8 ":
+			// 有损 VP8: 检查起始码 0x9d 0x01 0x2a
+			if len(data) >= 30 && data[23] == 0x9d && data[24] == 0x01 && data[25] == 0x2a {
+				w := int(binary.LittleEndian.Uint16(data[26:28])) & 0x3fff
+				h := int(binary.LittleEndian.Uint16(data[28:30])) & 0x3fff
+				return w, h
+			}
+		case "VP8L":
+			// 无损 VP8L: signature 0x2f
+			if len(data) >= 25 && data[20] == 0x2f {
+				n := uint32(data[21]) | (uint32(data[22]) << 8) | (uint32(data[23]) << 16) | (uint32(data[24]) << 24)
+				w := int(n&0x3fff) + 1
+				h := int((n>>14)&0x3fff) + 1
+				return w, h
+			}
+		case "VP8X":
+			// 扩展 VP8X: 24-bit canvas width-1, canvas height-1
+			if len(data) >= 30 {
+				w := int(data[24]) | (int(data[25]) << 8) | (int(data[26]) << 16) + 1
+				h := int(data[27]) | (int(data[28]) << 8) | (int(data[29]) << 16) + 1
+				return w, h
+			}
+		}
+	}
+
+	return 0, 0
+}
+
+// calculateDisplayDimensions scales original image dimensions down proportionally if it exceeds max constraints.
+func calculateDisplayDimensions(origW, origH int) (int, int) {
+	if origW <= 0 || origH <= 0 {
+		return 0, 0
+	}
+
+	w := float64(origW)
+	h := float64(origH)
+
+	// 如果原图在最大限制以内，保持原尺寸展示，不放大
+	if w <= maxImageDisplayWidth && h <= maxImageDisplayHeight {
+		return origW, origH
+	}
+
+	// 超过最大限制，等比例缩小
+	scaleW := maxImageDisplayWidth / w
+	scaleH := maxImageDisplayHeight / h
+	scale := scaleW
+	if scaleH < scale {
+		scale = scaleH
+	}
+
+	dW := int(w*scale + 0.5)
+	dH := int(h*scale + 0.5)
+	if dW < 1 {
+		dW = 1
+	}
+	if dH < 1 {
+		dH = 1
+	}
+	return dW, dH
+}
+
+// formatImageHTML generates an <img> tag with auto-scaled display width and height.
+func formatImageHTML(imgURL string, origW, origH int) string {
+	escapedURL := html.EscapeString(imgURL)
+	if origW > 0 && origH > 0 {
+		dW, dH := calculateDisplayDimensions(origW, origH)
+		return fmt.Sprintf(`<br><img src="%s" width="%d" height="%d" style="width: %dpx; height: %dpx; max-width: 100%%; object-fit: contain; border-radius: 4px; margin: 5px 0;"><br>`, escapedURL, dW, dH, dW, dH)
+	}
+	return fmt.Sprintf(`<br><img src="%s" style="max-width: 300px; max-height: 320px; border-radius: 4px; margin: 5px 0; object-fit: contain;"><br>`, escapedURL)
+}
 
 func downloadImageData(imgURL string) ([]byte, string, error) {
 	client := &http.Client{Timeout: 15 * time.Second}
@@ -55,7 +159,7 @@ func downloadImageData(imgURL string) ([]byte, string, error) {
 	return data, contentType, nil
 }
 
-// ProcessCQImage downloads QQ image, uploads to Yunhu image CDN, and returns <img> tag to avoid payload size limit.
+// ProcessCQImage downloads QQ image, uploads to Yunhu image CDN, and returns <img> tag with resolution-scaled dimensions.
 func ProcessCQImage(imgURL, fileVal string) string {
 	if imgURL == "" && fileVal != "" {
 		if strings.HasPrefix(fileVal, "http://") || strings.HasPrefix(fileVal, "https://") {
@@ -72,8 +176,11 @@ func ProcessCQImage(imgURL, fileVal string) string {
 		cacheKey = imgURL
 	}
 	if val, ok := imageCache.Load(cacheKey); ok {
+		if item, ok := val.(imageCacheItem); ok && item.url != "" {
+			return formatImageHTML(item.url, item.width, item.height)
+		}
 		if cachedURL, ok := val.(string); ok && cachedURL != "" {
-			return fmt.Sprintf(`<br><img src="%s" style="max-width: 100%%; margin: 5px 0; border-radius: 4px;"><br>`, cachedURL)
+			return formatImageHTML(cachedURL, 0, 0)
 		}
 	}
 
@@ -81,15 +188,18 @@ func ProcessCQImage(imgURL, fileVal string) string {
 	data, contentType, err := downloadImageData(imgURL)
 	if err != nil {
 		log.Printf("[CQ Image] 下载图片失败: %v (URL: %s)", err, imgURL)
-		return fmt.Sprintf(`<br><img src="%s" style="max-width: 100%%; margin: 5px 0; border-radius: 4px;"><br>`, html.EscapeString(imgURL))
+		return formatImageHTML(imgURL, 0, 0)
 	}
+
+	// 解析图片原始宽高
+	origW, origH := getImageDimensions(data)
 
 	// 2. 优先上传到云湖官方图床，解决防盗链并规避 Base64 导致消息内容过长 (code 1002) 的问题
 	if GlobalYHSender != nil {
 		yhURL, err := GlobalYHSender.UploadImage(data, fileVal)
 		if err == nil && yhURL != "" {
-			imageCache.Store(cacheKey, yhURL)
-			return fmt.Sprintf(`<br><img src="%s" style="max-width: 100%%; margin: 5px 0; border-radius: 4px;"><br>`, yhURL)
+			imageCache.Store(cacheKey, imageCacheItem{url: yhURL, width: origW, height: origH})
+			return formatImageHTML(yhURL, origW, origH)
 		}
 		log.Printf("[CQ Image] 上传到云湖失败: %v，准备降级处理", err)
 	}
@@ -98,11 +208,13 @@ func ProcessCQImage(imgURL, fileVal string) string {
 	if len(data) <= 25*1024 {
 		base64Str := base64.StdEncoding.EncodeToString(data)
 		base64Src := fmt.Sprintf("data:%s;base64,%s", contentType, base64Str)
-		return fmt.Sprintf(`<br><img src="%s" style="max-width: 100%%; margin: 5px 0; border-radius: 4px;"><br>`, base64Src)
+		imageCache.Store(cacheKey, imageCacheItem{url: base64Src, width: origW, height: origH})
+		return formatImageHTML(base64Src, origW, origH)
 	}
 
 	// 4. 大图降级直接展示外链，防止几百 KB 的 base64 撑爆云湖载荷
-	return fmt.Sprintf(`<br><img src="%s" style="max-width: 100%%; margin: 5px 0; border-radius: 4px;"><br>`, html.EscapeString(imgURL))
+	imageCache.Store(cacheKey, imageCacheItem{url: imgURL, width: origW, height: origH})
+	return formatImageHTML(imgURL, origW, origH)
 }
 
 // parseCQParams parses parameter key-value pairs from a CQ code parameter string.
