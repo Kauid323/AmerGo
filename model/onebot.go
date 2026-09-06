@@ -671,7 +671,7 @@ func (e *OneBotEvent) GetRawMessage() string {
 				qq, _ := data["qq"].(string)
 				sb.WriteString(fmt.Sprintf("[CQ:at,qq=%s]", qq))
 			case "face":
-				id, _ := data["id"].(string)
+				id := FormatIntOrFloat(data["id"])
 				sb.WriteString(fmt.Sprintf("[CQ:face,id=%s]", id))
 			case "forward":
 				id, _ := data["id"].(string)

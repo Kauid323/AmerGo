@@ -13,6 +13,7 @@ import (
 	"net/textproto"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"amer/config"
@@ -31,7 +32,10 @@ type commonResp struct {
 	Code int    `json:"code"`
 	Msg  string `json:"msg"`
 	Data struct {
-		MsgID string `json:"msgId"`
+		MsgID       string `json:"msgId"`
+		MessageInfo struct {
+			MsgID string `json:"msgId"`
+		} `json:"messageInfo"`
 	} `json:"data"`
 }
 
@@ -42,13 +46,15 @@ func isSuccess(code int, msg string) bool {
 	return false
 }
 
+var BotSendBaseURL = "https://chat-go.jwzhd.com"
+
 func (c *Client) Send(recvID, recvType, contentType, content string) (string, error) {
 	token := config.AppConfig.YH.Token
 	if token == "" {
 		return "", fmt.Errorf("云湖机器人 token 未配置")
 	}
 
-	apiURL := fmt.Sprintf("https://chat-go.jwzhd.com/open-apis/v1/bot/send?token=%s", token)
+	apiURL := fmt.Sprintf("%s/open-apis/v1/bot/send?token=%s", BotSendBaseURL, token)
 
 	payload := map[string]interface{}{
 		"recvId":      recvID,
@@ -85,9 +91,13 @@ func (c *Client) Send(recvID, recvType, contentType, content string) (string, er
 		if !isSuccess(apiResp.Code, apiResp.Msg) {
 			return "", fmt.Errorf("%s", apiResp.Msg)
 		}
-		if apiResp.Data.MsgID != "" {
-			db.SaveYunhuMsgCache(apiResp.Data.MsgID, recvID, recvType, "", apiResp.Data.MsgID)
-			return apiResp.Data.MsgID, nil
+		msgID := apiResp.Data.MessageInfo.MsgID
+		if msgID == "" {
+			msgID = apiResp.Data.MsgID
+		}
+		if msgID != "" {
+			db.SaveYunhuMsgCache(msgID, recvID, recvType, "", msgID)
+			return msgID, nil
 		}
 	}
 
@@ -231,8 +241,96 @@ func (c *Client) SetBoard(recvID, recvType, content string) error {
 	return nil
 }
 
+type YunhuGroupInfo struct {
+	ID           int64  `json:"id"`
+	GroupID      string `json:"groupId"`
+	Name         string `json:"name"`
+	Introduction string `json:"introduction"`
+	CreateBy     string `json:"createBy"`
+	AvatarURL    string `json:"avatarUrl"`
+	Headcount    int64  `json:"headcount"`
+}
+
+type YunhuGroupInfoResp struct {
+	Code int    `json:"code"`
+	Msg  string `json:"msg"`
+	Data struct {
+		Group YunhuGroupInfo `json:"group"`
+	} `json:"data"`
+}
+
+var yhGroupNameCache sync.Map // map[string]string (groupID -> groupName)
+
+var GroupInfoBaseURL = "https://chat-web-go.jwzhd.com/v1/group/group-info"
+
+// FetchGroupInfo fetches official group metadata from Yunhu API https://chat-web-go.jwzhd.com/v1/group/group-info
+func (c *Client) FetchGroupInfo(groupID string) (*YunhuGroupInfo, error) {
+	if groupID == "" {
+		return nil, fmt.Errorf("empty groupID")
+	}
+
+	reqBody := map[string]string{"groupId": groupID}
+	data, err := json.Marshal(reqBody)
+	if err != nil {
+		return nil, err
+	}
+
+	req, err := http.NewRequest("POST", GroupInfoBaseURL, bytes.NewReader(data))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+	req.Header.Set("Accept", "application/json, text/plain, */*")
+
+	httpClient := c.httpClient
+	if httpClient == nil {
+		httpClient = &http.Client{Timeout: 5 * time.Second}
+	}
+
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	var result YunhuGroupInfoResp
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, err
+	}
+
+	if result.Code != 1 && result.Code != 0 && !strings.EqualFold(result.Msg, "success") {
+		return nil, fmt.Errorf("api error: code=%d msg=%s", result.Code, result.Msg)
+	}
+
+	group := &result.Data.Group
+	if group.Name != "" {
+		yhGroupNameCache.Store(groupID, group.Name)
+	}
+	return group, nil
+}
+
+// GetGroupName returns the human-readable Yunhu group name, fetching it dynamically from the official API.
 func (c *Client) GetGroupName(groupID string) string {
-	return fmt.Sprintf("云湖群-%s", groupID)
+	if groupID == "" {
+		return ""
+	}
+	if val, ok := yhGroupNameCache.Load(groupID); ok {
+		if name, ok := val.(string); ok && name != "" {
+			return name
+		}
+	}
+
+	// 远程拉取群信息并缓存
+	info, err := c.FetchGroupInfo(groupID)
+	if err == nil && info != nil && info.Name != "" {
+		return info.Name
+	}
+
+	fallback := fmt.Sprintf("云湖群-%s", groupID)
+	// 避免短时间内因网络异常频繁重试，缓存兜底值
+	yhGroupNameCache.Store(groupID, fallback)
+	return fallback
 }
 
 var ImageUploadBaseURL = "https://chat-go.jwzhd.com"

@@ -18,7 +18,7 @@ type ReplyMsgInfo struct {
 }
 
 type QQMessageSender interface {
-	SendGroupMsg(groupID int64, message string) error
+	SendGroupMsg(groupID int64, message string) (int64, error)
 	SendGroupForwardMsg(groupID int64, nodes []interface{}) error
 	GetGroupName(groupID int64) string
 	GetSelfInfo() (int64, string)
@@ -171,6 +171,10 @@ func SendToAllBindings(platform, id, msgType, content, senderID, senderNickname,
 					} else {
 						if yhMsgID != "" {
 							db.SaveYunhuMsgCache(msgID, g.ID, "group", senderID, yhMsgID)
+							if qqMsgIDNum, err := strconv.ParseInt(msgID, 10, 64); err == nil && qqMsgIDNum != 0 {
+								qqGroupIDNum, _ := strconv.ParseInt(id, 10, 64)
+								db.SaveQQMsgMapping(qqMsgIDNum, qqGroupIDNum, senderID, senderNickname, content, yhMsgID)
+							}
 						}
 						log.Printf("[Sync Success] 成功同步消息到云湖群 %s (yhMsgId: %s)", g.ID, yhMsgID)
 					}
@@ -202,14 +206,19 @@ func SendToAllBindings(platform, id, msgType, content, senderID, senderNickname,
 							if sendErr != nil {
 								log.Printf("[Sync Warning] 使用 OneBot 11 合并转发视频失败 (%v)，尝试使用常规消息同步", sendErr)
 								headerText := ReplaceBlockedWords(noBaseContent)
-								sendErr = GlobalQQSender.SendGroupMsg(qqGroupID, fmt.Sprintf("%s\n[CQ:video,file=%s]", headerText, videoFilePath))
+								_, sendErr = GlobalQQSender.SendGroupMsg(qqGroupID, fmt.Sprintf("%s\n[CQ:video,file=%s]", headerText, videoFilePath))
 							} else {
 								log.Printf("[Sync Success] 成功通过 OneBot 11 合并转发节点将视频消息同步至 QQ 群 %d", qqGroupID)
 							}
 						} else {
-							sendErr = GlobalQQSender.SendGroupMsg(qqGroupID, forwardContent)
+							var sentQQMsgID int64
+							sentQQMsgID, sendErr = GlobalQQSender.SendGroupMsg(qqGroupID, forwardContent)
 							if sendErr == nil {
-								log.Printf("[Sync Success] 成功同步消息到 QQ 群 %d", qqGroupID)
+								log.Printf("[Sync Success] 成功同步消息到 QQ 群 %d (qqMsgId: %d)", qqGroupID, sentQQMsgID)
+								if sentQQMsgID != 0 && msgID != "" {
+									db.BindYunhuMsgToQQMsg(msgID, sentQQMsgID)
+									db.SaveQQMsgMapping(sentQQMsgID, qqGroupID, senderID, senderNickname, content, msgID)
+								}
 							}
 						}
 

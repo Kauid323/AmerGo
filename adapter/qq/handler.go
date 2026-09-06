@@ -62,7 +62,7 @@ func handleQQMessage(event model.OneBotEvent) {
 		if event.MessageType == "private" {
 			_ = GlobalOneBotServer.SendPrivateMsg(senderUserID, replyMsg)
 		} else {
-			_ = GlobalOneBotServer.SendGroupMsg(event.GroupID.Int64(), replyMsg)
+			_, _ = GlobalOneBotServer.SendGroupMsg(event.GroupID.Int64(), replyMsg)
 		}
 		return
 	}
@@ -97,7 +97,7 @@ func handleQQMessage(event model.OneBotEvent) {
 			// 未绑定有效云湖群。如果用户 @机器人 但未触发有效指令，提示绑定引导
 			if isAtBot {
 				tip := "【Amer 互通提示】当前 QQ 群尚未绑定云湖群！\n如需互通，请使用以下指令进行绑定：\n/绑定 yh <云湖群ID>\n或查看帮助：/帮助"
-				_ = GlobalOneBotServer.SendGroupMsg(groupID, tip)
+				_, _ = GlobalOneBotServer.SendGroupMsg(groupID, tip)
 			}
 			// 未绑定有效云湖群，不进行跨平台媒体处理、上传与同步，避免浪费云湖空间与流量
 			return
@@ -131,6 +131,11 @@ func handleQQMessage(event model.OneBotEvent) {
 			avatarURL, cleanedName, senderUserIDStr, cleanedMsgHTML, groupName, groupIDStr, time.Now().Format("2006-01-02 15:04:05"),
 		)
 		contentHTML = message.CompressHTML(contentHTML)
+
+		// 记录 QQ 消息缓存，供云湖引用时反查
+		if event.MessageID.Int64() != 0 {
+			db.SaveQQMsgMapping(event.MessageID.Int64(), groupID, senderUserIDStr, cleanedName, rawMsg, "")
+		}
 
 		if strings.Contains(rawMsg, "@全体成员") {
 			message.SetBoardForAllGroups("QQ", groupIDStr, strings.ReplaceAll(rawMsg, "@全体成员", ""), groupName)
@@ -206,6 +211,12 @@ func parseNodeContent(content interface{}, groupID int64) string {
 					if text, ok := dataMap["text"].(string); ok {
 						sb.WriteString(html.EscapeString(text))
 					}
+				case "face":
+					faceID := ""
+					if idVal, ok := dataMap["id"]; ok && idVal != nil {
+						faceID = model.FormatIntOrFloat(idVal)
+					}
+					sb.WriteString(message.FormatQQFaceHTML(faceID))
 				case "image":
 					imgURL, _ := dataMap["url"].(string)
 					fileVal, _ := dataMap["file"].(string)
@@ -379,7 +390,7 @@ func handleQQCommand(event model.OneBotEvent, groupIDStr, userIDStr, cmd string)
 	switch mainCmd {
 	case "帮助":
 		helpMsg := "📌 Amer 指令指南 📌\n\n1. /帮助 - 查看当前帮助信息\n2. /绑定列表 - 查看当前群聊绑定的云湖群\n3. /绑定 yh <云湖群ID> - 将当前QQ群与指定云湖群绑定\n4. /解绑 yh <云湖群ID> - 解除指定云湖群绑定\n5. /解绑 全部 - 解除当前群的所有绑定\n6. /同步模式 <全同步/QQ到云湖/云湖到QQ/停止> [云湖群ID] - 设置同步模式"
-		_ = GlobalOneBotServer.SendGroupMsg(groupID, helpMsg)
+		_, _ = GlobalOneBotServer.SendGroupMsg(groupID, helpMsg)
 		return true
 
 	case "绑定列表":
@@ -402,15 +413,15 @@ func handleQQCommand(event model.OneBotEvent, groupIDStr, userIDStr, cmd string)
 			} else {
 				menu += "当前QQ群未绑定任何云湖群。\n"
 			}
-			_ = GlobalOneBotServer.SendGroupMsg(groupID, menu)
+			_, _ = GlobalOneBotServer.SendGroupMsg(groupID, menu)
 		} else {
-			_ = GlobalOneBotServer.SendGroupMsg(groupID, bindInfos.Msg)
+			_, _ = GlobalOneBotServer.SendGroupMsg(groupID, bindInfos.Msg)
 		}
 		return true
 
 	case "绑定":
 		if len(parts) < 3 {
-			_ = GlobalOneBotServer.SendGroupMsg(groupID, "指令格式错误，请使用：/绑定 yh <云湖群ID>")
+			_, _ = GlobalOneBotServer.SendGroupMsg(groupID, "指令格式错误，请使用：/绑定 yh <云湖群ID>")
 			return true
 		}
 		platform := strings.ToLower(parts[1])
@@ -420,21 +431,21 @@ func handleQQCommand(event model.OneBotEvent, groupIDStr, userIDStr, cmd string)
 			bindStatus := db.Bind("QQ", "YH", groupIDStr, targetID)
 			if bindStatus.Status == 0 {
 				qqGroupName := GlobalOneBotServer.GetGroupName(groupID)
-				_ = GlobalOneBotServer.SendGroupMsg(groupID, fmt.Sprintf("云湖群 %s 已成功绑定！", targetID))
+				_, _ = GlobalOneBotServer.SendGroupMsg(groupID, fmt.Sprintf("云湖群 %s 已成功绑定！", targetID))
 				if message.GlobalYHSender != nil {
 					_, _ = message.GlobalYHSender.Send(targetID, "group", "text", fmt.Sprintf("【Amer 绑定通知】与 QQ群「%s」(ID: %s) 绑定成功！", qqGroupName, groupIDStr))
 				}
 			} else {
-				_ = GlobalOneBotServer.SendGroupMsg(groupID, fmt.Sprintf("绑定失败: %s", bindStatus.Msg))
+				_, _ = GlobalOneBotServer.SendGroupMsg(groupID, fmt.Sprintf("绑定失败: %s", bindStatus.Msg))
 			}
 		} else {
-			_ = GlobalOneBotServer.SendGroupMsg(groupID, "不支持的平台！仅支持：yh（云湖群）")
+			_, _ = GlobalOneBotServer.SendGroupMsg(groupID, "不支持的平台！仅支持：yh（云湖群）")
 		}
 		return true
 
 	case "解绑":
 		if len(parts) < 2 {
-			_ = GlobalOneBotServer.SendGroupMsg(groupID, "指令格式错误，请使用：/解绑 yh <云湖群ID> 或 /解绑 全部")
+			_, _ = GlobalOneBotServer.SendGroupMsg(groupID, "指令格式错误，请使用：/解绑 yh <云湖群ID> 或 /解绑 全部")
 			return true
 		}
 		target := strings.ToLower(parts[1])
@@ -452,7 +463,7 @@ func handleQQCommand(event model.OneBotEvent, groupIDStr, userIDStr, cmd string)
 				}
 			}
 			unbindStatus := db.UnbindAll("QQ", groupIDStr)
-			_ = GlobalOneBotServer.SendGroupMsg(groupID, unbindStatus.Msg)
+			_, _ = GlobalOneBotServer.SendGroupMsg(groupID, unbindStatus.Msg)
 			return true
 		}
 
@@ -461,22 +472,22 @@ func handleQQCommand(event model.OneBotEvent, groupIDStr, userIDStr, cmd string)
 			unbindStatus := db.Unbind("QQ", "YH", groupIDStr, yhID)
 			if unbindStatus.Status == 0 {
 				qqGroupName := GlobalOneBotServer.GetGroupName(groupID)
-				_ = GlobalOneBotServer.SendGroupMsg(groupID, fmt.Sprintf("云湖群 %s 已成功解绑！", yhID))
+				_, _ = GlobalOneBotServer.SendGroupMsg(groupID, fmt.Sprintf("云湖群 %s 已成功解绑！", yhID))
 				if message.GlobalYHSender != nil {
 					_, _ = message.GlobalYHSender.Send(yhID, "group", "text", fmt.Sprintf("【Amer 解绑通知】与 QQ群「%s」(ID: %s) 的绑定已解除！", qqGroupName, groupIDStr))
 				}
 			} else {
-				_ = GlobalOneBotServer.SendGroupMsg(groupID, fmt.Sprintf("解绑失败: %s", unbindStatus.Msg))
+				_, _ = GlobalOneBotServer.SendGroupMsg(groupID, fmt.Sprintf("解绑失败: %s", unbindStatus.Msg))
 			}
 			return true
 		}
 
-		_ = GlobalOneBotServer.SendGroupMsg(groupID, "指令格式错误，请使用：/解绑 yh <云湖群ID> 或 /解绑 全部")
+		_, _ = GlobalOneBotServer.SendGroupMsg(groupID, "指令格式错误，请使用：/解绑 yh <云湖群ID> 或 /解绑 全部")
 		return true
 
 	case "同步模式":
 		if len(parts) < 2 {
-			_ = GlobalOneBotServer.SendGroupMsg(groupID, "指令格式错误，用法：/同步模式 <全同步/QQ到云湖/云湖到QQ/停止> [云湖群ID]")
+			_, _ = GlobalOneBotServer.SendGroupMsg(groupID, "指令格式错误，用法：/同步模式 <全同步/QQ到云湖/云湖到QQ/停止> [云湖群ID]")
 			return true
 		}
 		syncType := parts[1]
@@ -494,7 +505,7 @@ func handleQQCommand(event model.OneBotEvent, groupIDStr, userIDStr, cmd string)
 
 		syncData, ok := validModes[syncType]
 		if !ok {
-			_ = GlobalOneBotServer.SendGroupMsg(groupID, "无效的同步模式！可用模式: 全同步, QQ到云湖, 云湖到QQ, 停止")
+			_, _ = GlobalOneBotServer.SendGroupMsg(groupID, "无效的同步模式！可用模式: 全同步, QQ到云湖, 云湖到QQ, 停止")
 			return true
 		}
 
@@ -502,12 +513,12 @@ func handleQQCommand(event model.OneBotEvent, groupIDStr, userIDStr, cmd string)
 		if targetYHGroup != "" {
 			res := db.SetSync("QQ", "YH", groupIDStr, targetYHGroup, syncData)
 			if res.Status == 0 {
-				_ = GlobalOneBotServer.SendGroupMsg(groupID, fmt.Sprintf("已成功将云湖群 %s 的同步模式设置为: %s", targetYHGroup, syncType))
+				_, _ = GlobalOneBotServer.SendGroupMsg(groupID, fmt.Sprintf("已成功将云湖群 %s 的同步模式设置为: %s", targetYHGroup, syncType))
 				if message.GlobalYHSender != nil {
 					_, _ = message.GlobalYHSender.Send(targetYHGroup, "group", "text", fmt.Sprintf("【Amer 同步模式通知】来自 QQ群「%s」(ID: %s) 的同步模式已更改为: %s", qqGroupName, groupIDStr, syncType))
 				}
 			} else {
-				_ = GlobalOneBotServer.SendGroupMsg(groupID, fmt.Sprintf("设置同步模式失败: %s", res.Msg))
+				_, _ = GlobalOneBotServer.SendGroupMsg(groupID, fmt.Sprintf("设置同步模式失败: %s", res.Msg))
 			}
 		} else {
 			bindInfos := db.GetInfo("QQ", groupIDStr)
@@ -516,14 +527,14 @@ func handleQQCommand(event model.OneBotEvent, groupIDStr, userIDStr, cmd string)
 					for _, y := range yhGroupIDs {
 						res := db.SetSync("QQ", "YH", groupIDStr, y.ID, syncData)
 						if res.Status == 0 {
-							_ = GlobalOneBotServer.SendGroupMsg(groupID, fmt.Sprintf("已成功将云湖群 %s 的同步模式设置为: %s", y.ID, syncType))
+							_, _ = GlobalOneBotServer.SendGroupMsg(groupID, fmt.Sprintf("已成功将云湖群 %s 的同步模式设置为: %s", y.ID, syncType))
 							if message.GlobalYHSender != nil {
 								_, _ = message.GlobalYHSender.Send(y.ID, "group", "text", fmt.Sprintf("【Amer 同步模式通知】来自 QQ群「%s」(ID: %s) 的同步模式已更改为: %s", qqGroupName, groupIDStr, syncType))
 							}
 						}
 					}
 				} else {
-					_ = GlobalOneBotServer.SendGroupMsg(groupID, "当前 QQ 群未绑定任何云湖群！")
+					_, _ = GlobalOneBotServer.SendGroupMsg(groupID, "当前 QQ 群未绑定任何云湖群！")
 				}
 			}
 		}

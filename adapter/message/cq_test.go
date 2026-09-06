@@ -2,6 +2,7 @@ package message
 
 import (
 	"amer/config"
+	"amer/db"
 	"amer/model"
 	"fmt"
 	"strings"
@@ -10,7 +11,9 @@ import (
 
 type mockQQSender struct{}
 
-func (m *mockQQSender) SendGroupMsg(groupID int64, message string) error            { return nil }
+func (m *mockQQSender) SendGroupMsg(groupID int64, message string) (int64, error) {
+	return 123456, nil
+}
 func (m *mockQQSender) SendGroupForwardMsg(groupID int64, nodes []interface{}) error { return nil }
 func (m *mockQQSender) GetGroupName(groupID int64) string                           { return "测试群" }
 func (m *mockQQSender) GetSelfInfo() (int64, string)                                { return 3218936228, "Amer" }
@@ -461,9 +464,67 @@ func TestUnboundGroupDoesNotUploadMedia(t *testing.T) {
 		t.Errorf("expected original imgURL in html, got: %s", res)
 	}
 }
+func TestBuildYunhuReplyCQPrefix(t *testing.T) {
+	// 1. 测试未关联的纯 UUID
+	unmappedPrefix := BuildYunhuReplyCQPrefix("6b610aa43fcd4a3f8758c9e9c2ed5045", "Amer - Q湖互通: HTML消息")
+	if unmappedPrefix != "" {
+		t.Errorf("expected empty prefix for unmapped uuid, got: %s", unmappedPrefix)
+	}
 
+	// 2. 保存映射关系后解析
+	qqMsgID := int64(1710849642)
+	yhMsgID := "6b610aa43fcd4a3f8758c9e9c2ed5045"
+	db.SaveQQMsgMapping(qqMsgID, 929814964, "171989292", "测试用户", "原QQ消息内容", yhMsgID)
 
+	mappedPrefix := BuildYunhuReplyCQPrefix(yhMsgID, "Amer - Q湖互通: HTML消息")
+	expected := fmt.Sprintf("[CQ:reply,id=%d]", qqMsgID)
+	if mappedPrefix != expected {
+		t.Errorf("expected mappedPrefix = %s, got: %s", expected, mappedPrefix)
+	}
 
+	// 3. 直接传入 QQ 消息 ID 作为 parentId
+	directPrefix := BuildYunhuReplyCQPrefix("1710849642", "")
+	if directPrefix != expected {
+		t.Errorf("expected directPrefix = %s, got: %s", expected, directPrefix)
+	}
+}
+
+func TestQQFaceParsing(t *testing.T) {
+	// 1. 测试常用与特定表情名称解析
+	if got := ParseQQFace("344"); got != "[大怨种]" {
+		t.Errorf("ParseQQFace(344) = %v, want [大怨种]", got)
+	}
+	if got := ParseQQFace("14"); got != "[微笑]" {
+		t.Errorf("ParseQQFace(14) = %v, want [微笑]", got)
+	}
+	if got := ParseQQFace("0"); got != "[惊讶]" {
+		t.Errorf("ParseQQFace(0) = %v, want [惊讶]", got)
+	}
+	if got := ParseQQFace("99999"); got != "[表情:99999]" {
+		t.Errorf("ParseQQFace(99999) = %v, want [表情:99999]", got)
+	}
+	if got := ParseQQFace(""); got != "[表情]" {
+		t.Errorf("ParseQQFace('') = %v, want [表情]", got)
+	}
+
+	// 2. 测试 HTML 渲染 (带 QFace 图标和 alt 回退)
+	html344 := FormatQQFaceHTML("344")
+	if !strings.Contains(html344, "s344.png") || !strings.Contains(html344, `alt="[大怨种]"`) {
+		t.Errorf("FormatQQFaceHTML(344) = %s", html344)
+	}
+
+	// 3. 测试 CQToHTML / CQToHTMLWithGroup
+	cqHTML := CQToHTML("看[CQ:face,id=344]哈哈")
+	if !strings.Contains(cqHTML, "s344.png") || !strings.Contains(cqHTML, "大怨种") {
+		t.Errorf("CQToHTML face failed: %s", cqHTML)
+	}
+
+	// 4. 测试 FormatCQAtText 纯文本替换
+	textMsg := FormatCQAtText("测试[CQ:face,id=344]表情", 0)
+	if textMsg != "测试[大怨种]表情" {
+		t.Errorf("FormatCQAtText face = %s, want 测试[大怨种]表情", textMsg)
+	}
+}
 
 
 

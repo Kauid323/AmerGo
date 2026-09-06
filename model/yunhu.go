@@ -58,6 +58,7 @@ type YunhuContent struct {
 	VideoURL      string                 `json:"videoUrl"`
 	VideoDuration int                    `json:"videoDuration"`
 	Etag          string                 `json:"etag"`
+	Parent        string                 `json:"parent"`
 	FormJson      map[string]interface{} `json:"formJson"`
 }
 

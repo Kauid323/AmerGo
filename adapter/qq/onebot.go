@@ -209,12 +209,24 @@ func (s *OneBotServer) CallAPIWithTimeout(action string, params map[string]inter
 	}
 }
 
-func (s *OneBotServer) SendGroupMsg(groupID int64, message string) error {
-	_, err := s.CallAPI("send_group_msg", map[string]interface{}{
+func (s *OneBotServer) SendGroupMsg(groupID int64, message string) (int64, error) {
+	resp, err := s.CallAPI("send_group_msg", map[string]interface{}{
 		"group_id": groupID,
 		"message":  message,
 	})
-	return err
+	if err != nil {
+		return 0, err
+	}
+	if resp.Status == "failed" {
+		return 0, fmt.Errorf("OneBot API 错误 (%d): %s", resp.RetCode, resp.Wording)
+	}
+	var data struct {
+		MessageID int64 `json:"message_id"`
+	}
+	if len(resp.Data) > 0 {
+		_ = json.Unmarshal(resp.Data, &data)
+	}
+	return data.MessageID, nil
 }
 
 func (s *OneBotServer) SendGroupForwardMsg(groupID int64, nodes []interface{}) error {
@@ -385,7 +397,11 @@ func extractTextFromOneBotMsg(msg interface{}) string {
 				case "record":
 					sb.WriteString("[语音]")
 				case "face":
-					sb.WriteString("[表情]")
+					faceID := ""
+					if idVal, ok := data["id"]; ok && idVal != nil {
+						faceID = model.FormatIntOrFloat(idVal)
+					}
+					sb.WriteString(message.ParseQQFace(faceID))
 				case "at":
 					if qq, ok := data["qq"].(string); ok {
 						sb.WriteString("@" + qq + " ")
@@ -418,8 +434,14 @@ func formatReplySummary(raw string) string {
 	raw = reVideo.ReplaceAllString(raw, "[视频]")
 	reAudio := regexp.MustCompile(`\[CQ:record,[^\]]+\]`)
 	raw = reAudio.ReplaceAllString(raw, "[语音]")
-	reFace := regexp.MustCompile(`\[CQ:face,[^\]]+\]`)
-	raw = reFace.ReplaceAllString(raw, "[表情]")
+	reFace := regexp.MustCompile(`\[CQ:face,id=([-\d]+)[^\]]*\]`)
+	raw = reFace.ReplaceAllStringFunc(raw, func(m string) string {
+		sub := reFace.FindStringSubmatch(m)
+		if len(sub) >= 2 {
+			return message.ParseQQFace(sub[1])
+		}
+		return "[表情]"
+	})
 
 	reAt := regexp.MustCompile(`\[CQ:at,qq=([^,\]]+)[^\]]*\] ?`)
 	raw = reAt.ReplaceAllStringFunc(raw, func(m string) string {

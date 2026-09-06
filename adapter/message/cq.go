@@ -436,6 +436,28 @@ func FormatFileSizeStr(sizeStr string) string {
 	return sizeStr
 }
 
+// BuildYunhuReplyCQPrefix checks if a Yunhu message references a parent message,
+// and if that parent message was originally forwarded from a QQ message,
+// it returns the corresponding [CQ:reply,id=...] CQ code prefix for QQ forwarding.
+func BuildYunhuReplyCQPrefix(parentMsgID, parentSummary string) string {
+	parentMsgID = strings.TrimSpace(parentMsgID)
+	if parentMsgID == "" {
+		return ""
+	}
+
+	// 1. 尝试从关联缓存中直接查出对应的真实 QQ 消息 ID
+	if qqMsgID, ok := db.GetQQMsgIDByYunhuMsgID(parentMsgID); ok && qqMsgID != 0 {
+		return fmt.Sprintf("[CQ:reply,id=%d]", qqMsgID)
+	}
+
+	// 2. 如果 parentMsgID 本身就是纯数字（可能是 QQ 消息 ID），也可以直接构造
+	if num, err := strconv.ParseInt(parentMsgID, 10, 64); err == nil && num != 0 {
+		return fmt.Sprintf("[CQ:reply,id=%d]", num)
+	}
+
+	return ""
+}
+
 // RenderFileHTML formats a file transfer message into a clean, flat HTML card for Yunhu
 func RenderFileHTML(name, sizeStr, fileURL string) string {
 	name = html.EscapeString(UnescapeCQ(strings.TrimSpace(name)))
@@ -536,7 +558,7 @@ func CQToHTMLWithGroup(msg string, groupID int64) string {
 			return fmt.Sprintf("<b>@%s</b> ", html.EscapeString(displayName))
 
 		case "face":
-			return "[表情]"
+			return FormatQQFaceHTML(params["id"])
 
 		case "record":
 			return "[语音消息]"
@@ -1222,6 +1244,16 @@ func FormatCQAtText(msg string, groupID int64) string {
 			}
 		}
 		return fmt.Sprintf("@%s ", displayName)
+	})
+
+	// 格式化 face 表情为友好纯文本标记 (如 [大怨种])
+	reFace := regexp.MustCompile(`\[CQ:face,id=([-\d]+)[^\]]*\]`)
+	msg = reFace.ReplaceAllStringFunc(msg, func(cq string) string {
+		matches := reFace.FindStringSubmatch(cq)
+		if len(matches) >= 2 {
+			return ParseQQFace(matches[1])
+		}
+		return "[表情]"
 	})
 
 	msg = UnescapeCQ(msg)

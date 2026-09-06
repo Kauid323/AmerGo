@@ -314,13 +314,26 @@ func handleNormalMessage(event model.YunhuEvent) {
 	}
 
 	yhGroupName := YHClient.GetGroupName(chatID)
+	parentIDStr := strings.TrimSpace(msg.ParentID.String())
+	parentSummary := strings.TrimSpace(msg.Content.Parent)
+
+	replyPrefix := ""
+	if parentIDStr != "" {
+		replyPrefix = message.BuildYunhuReplyCQPrefix(parentIDStr, parentSummary)
+		if replyPrefix == "" && parentSummary != "" {
+			// 如果未能映射到具体 QQ 消息 ID，退回展示引用文字摘要
+			cleanParent := message.ReplaceBlockedWords(parentSummary)
+			replyPrefix = fmt.Sprintf("「引用: %s」\n", cleanParent)
+		}
+	}
+
 	formattedQQMsg := content
 	if msgType == "text" {
-		formattedQQMsg = fmt.Sprintf("[%s] %s(%s):\n%s", yhGroupName, sender.SenderNickname.String(), senderID, content)
+		formattedQQMsg = fmt.Sprintf("%s[%s] %s(%s):\n%s", replyPrefix, yhGroupName, sender.SenderNickname.String(), senderID, content)
 	} else if msgType == "image" {
-		formattedQQMsg = fmt.Sprintf("[%s] %s(%s):\n%s", yhGroupName, sender.SenderNickname.String(), senderID, content)
+		formattedQQMsg = fmt.Sprintf("%s[%s] %s(%s):\n%s", replyPrefix, yhGroupName, sender.SenderNickname.String(), senderID, content)
 	} else if msgType == "video" {
-		formattedQQMsg = fmt.Sprintf("[%s] %s(%s):\n[CQ:video,file=file:///%s]", yhGroupName, sender.SenderNickname.String(), senderID, filepath.ToSlash(videoLocalPath))
+		formattedQQMsg = fmt.Sprintf("%s[%s] %s(%s):\n[CQ:video,file=file:///%s]", replyPrefix, yhGroupName, sender.SenderNickname.String(), senderID, filepath.ToSlash(videoLocalPath))
 	}
 
 	message.SendToAllBindings("YH", chatID, msgType, content, senderID, sender.SenderNickname.String(), formattedQQMsg, msg.MsgID.String())
@@ -530,7 +543,7 @@ func handleInstructionMessage(event model.YunhuEvent) {
 					var qID int64
 					fmt.Sscanf(targetGroup, "%d", &qID)
 					yhGroupName := YHClient.GetGroupName(chatID)
-					_ = message.GlobalQQSender.SendGroupMsg(qID, fmt.Sprintf("【Amer 解绑通知】本 QQ 群与云湖群「%s」(ID: %s) 的绑定已解除！", yhGroupName, chatID))
+					_, _ = message.GlobalQQSender.SendGroupMsg(qID, fmt.Sprintf("【Amer 解绑通知】本 QQ 群与云湖群「%s」(ID: %s) 的绑定已解除！", yhGroupName, chatID))
 				}
 			}
 			_, _ = YHClient.Send(chatID, chatType, "text", res.Msg)
@@ -553,7 +566,7 @@ func handleInstructionMessage(event model.YunhuEvent) {
 				var qID int64
 				fmt.Sscanf(targetGroup, "%d", &qID)
 				yhGroupName := YHClient.GetGroupName(chatID)
-				_ = message.GlobalQQSender.SendGroupMsg(qID, fmt.Sprintf("【Amer 绑定通知】本 QQ 群与云湖群「%s」(ID: %s) 绑定成功！", yhGroupName, chatID))
+				_, _ = message.GlobalQQSender.SendGroupMsg(qID, fmt.Sprintf("【Amer 绑定通知】本 QQ 群与云湖群「%s」(ID: %s) 绑定成功！", yhGroupName, chatID))
 			}
 
 		case "同步模式":
@@ -598,7 +611,7 @@ func handleInstructionMessage(event model.YunhuEvent) {
 						var qID int64
 						fmt.Sscanf(targetQQGroup, "%d", &qID)
 						yhGroupName := YHClient.GetGroupName(chatID)
-						_ = message.GlobalQQSender.SendGroupMsg(qID, fmt.Sprintf("【Amer 同步模式通知】来自云湖群「%s」(ID: %s) 的同步模式已更改为: %s", yhGroupName, chatID, syncType))
+						_, _ = message.GlobalQQSender.SendGroupMsg(qID, fmt.Sprintf("【Amer 同步模式通知】来自云湖群「%s」(ID: %s) 的同步模式已更改为: %s", yhGroupName, chatID, syncType))
 					}
 				} else {
 					results = append(results, fmt.Sprintf("QQ群 %s 设置同步模式失败: %s", targetQQGroup, res.Msg))
