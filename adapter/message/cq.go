@@ -446,18 +446,18 @@ func RenderFileHTML(name, sizeStr, fileURL string) string {
 	readableSize := FormatFileSizeStr(sizeStr)
 
 	var sb strings.Builder
-	sb.WriteString(`<div style="background:#f8f9fa;border:1px solid #e2e8f0;border-left:3px solid #2563eb;border-radius:4px;padding:6px 10px;margin:3px 0;display:flex;align-items:center;justify-content:space-between;gap:8px;">`)
-	sb.WriteString(`<div style="display:flex;align-items:center;gap:6px;min-width:0;flex:1;">`)
-	sb.WriteString(`<span style="font-size:18px;line-height:1;">📁</span>`)
+	sb.WriteString(`<div style="background:#ffffff;border:1px solid #e2e8f0;border-left:3px solid #2563eb;border-radius:4px;padding:6px 8px;margin:3px 0;max-width:280px;box-sizing:border-box;">`)
+	sb.WriteString(`<div style="display:flex;align-items:flex-start;gap:6px;">`)
+	sb.WriteString(`<span style="font-size:16px;line-height:1.2;flex-shrink:0;">📁</span>`)
 	sb.WriteString(`<div style="min-width:0;flex:1;">`)
-	sb.WriteString(fmt.Sprintf(`<div style="font-weight:600;font-size:12px;color:#1e293b;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">%s</div>`, name))
+	sb.WriteString(fmt.Sprintf(`<div style="font-weight:600;font-size:12px;color:#1e293b;word-break:break-all;line-height:1.3;">%s</div>`, name))
 	if readableSize != "" {
-		sb.WriteString(fmt.Sprintf(`<div style="font-size:11px;color:#64748b;margin-top:1px;">%s</div>`, readableSize))
+		sb.WriteString(fmt.Sprintf(`<div style="font-size:11px;color:#64748b;margin-top:2px;line-height:1;">%s</div>`, readableSize))
 	}
 	sb.WriteString(`</div></div>`)
 
 	if fileURL != "" {
-		sb.WriteString(fmt.Sprintf(`<a href="%s" target="_blank" style="background:#2563eb;color:#ffffff;text-decoration:none;font-size:11px;font-weight:500;padding:3px 8px;border-radius:4px;white-space:nowrap;display:inline-block;">下载文件</a>`, html.EscapeString(fileURL)))
+		sb.WriteString(fmt.Sprintf(`<div style="margin-top:5px;padding-top:4px;border-top:1px dashed #f1f5f9;"><a href="%s" target="_blank" style="display:inline-block;background:#2563eb;color:#ffffff;text-decoration:none;font-size:11px;font-weight:500;padding:2px 8px;border-radius:3px;line-height:1.4;">下载文件</a></div>`, html.EscapeString(fileURL)))
 	}
 	sb.WriteString(`</div>`)
 

@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 )
@@ -243,6 +244,14 @@ func handleNormalMessage(event model.YunhuEvent) {
 		content = message.ConvertYunhuEmoji(content)
 	}
 	videoLocalPath := ""
+	var tempFilesToClean []string
+
+	// 如果文本中含有云湖图床链接，先下载到本地并替换为本地 file:/// 路径，防止 OneBot 报 403
+	if content != "" && strings.Contains(content, "chat-img.jwznb.com") {
+		var imgFiles []string
+		content, imgFiles = replaceYunhuImagesInText(content)
+		tempFilesToClean = append(tempFilesToClean, imgFiles...)
+	}
 
 	if content == "" {
 		if msg.Content.ImageURL != "" {
@@ -250,7 +259,16 @@ func handleNormalMessage(event model.YunhuEvent) {
 			if !strings.HasPrefix(imgURL, "http://") && !strings.HasPrefix(imgURL, "https://") {
 				imgURL = "https://chat-img.jwznb.com/" + strings.TrimPrefix(imgURL, "/")
 			}
-			content = fmt.Sprintf("[CQ:image,file=%s]", imgURL)
+			localImgPath, err := downloadYunhuImageToLocal(imgURL)
+			if err == nil && localImgPath != "" {
+				tempFilesToClean = append(tempFilesToClean, localImgPath)
+				localURI := "file:///" + filepath.ToSlash(localImgPath)
+				content = fmt.Sprintf("[CQ:image,file=%s]", localURI)
+				log.Printf("[Yunhu Image] 图片已下载到本地: %s (原URL: %s)", localURI, imgURL)
+			} else {
+				log.Printf("[Yunhu Image Warning] 下载图片到本地失败 (%v)，回退至网络 URL", err)
+				content = fmt.Sprintf("[CQ:image,file=%s]", imgURL)
+			}
 			msgType = "image"
 		} else if msg.Content.VideoURL != "" {
 			videoURL := msg.Content.VideoURL
@@ -272,6 +290,7 @@ func handleNormalMessage(event model.YunhuEvent) {
 					videoLocalPath = absPath
 					content = absPath
 					msgType = "video"
+					tempFilesToClean = append(tempFilesToClean, absPath)
 					log.Printf("[Yunhu Video Download] 视频成功下载至本地: %s", absPath)
 				} else {
 					log.Printf("[Yunhu Video Download Error] 视频下载失败: %v", errDownload)
@@ -299,23 +318,97 @@ func handleNormalMessage(event model.YunhuEvent) {
 	if msgType == "text" {
 		formattedQQMsg = fmt.Sprintf("[%s] %s(%s):\n%s", yhGroupName, sender.SenderNickname.String(), senderID, content)
 	} else if msgType == "image" {
-		formattedQQMsg = fmt.Sprintf("[%s] %s(%s):\n[CQ:image,file=%s]", yhGroupName, sender.SenderNickname.String(), senderID, msg.Content.ImageURL)
+		formattedQQMsg = fmt.Sprintf("[%s] %s(%s):\n%s", yhGroupName, sender.SenderNickname.String(), senderID, content)
 	} else if msgType == "video" {
 		formattedQQMsg = fmt.Sprintf("[%s] %s(%s):\n[CQ:video,file=file:///%s]", yhGroupName, sender.SenderNickname.String(), senderID, filepath.ToSlash(videoLocalPath))
 	}
 
 	message.SendToAllBindings("YH", chatID, msgType, content, senderID, sender.SenderNickname.String(), formattedQQMsg, msg.MsgID.String())
 
-	if videoLocalPath != "" {
-		go func(path string) {
-			time.Sleep(5 * time.Second)
-			if err := os.Remove(path); err == nil {
-				log.Printf("[Yunhu Video Clean] 已自动清理临时视频文件: %s", path)
-			} else {
-				log.Printf("[Yunhu Video Clean Error] 清理临时视频文件失败: %v", err)
+	// 延迟异步清理下载的本地临时图片与视频文件
+	if len(tempFilesToClean) > 0 {
+		go func(files []string) {
+			time.Sleep(30 * time.Second)
+			for _, f := range files {
+				if err := os.Remove(f); err == nil {
+					log.Printf("[Yunhu Temp Clean] 已自动清理临时文件: %s", f)
+				}
 			}
-		}(videoLocalPath)
+		}(tempFilesToClean)
 	}
+}
+
+// downloadYunhuImageToLocal downloads image from chat-img.jwznb.com to local temp folder with proper headers and returns absolute path.
+func downloadYunhuImageToLocal(imgURL string) (string, error) {
+	if imgURL == "" {
+		return "", fmt.Errorf("empty image url")
+	}
+	if !strings.HasPrefix(imgURL, "http://") && !strings.HasPrefix(imgURL, "https://") {
+		imgURL = "https://chat-img.jwznb.com/" + strings.TrimPrefix(imgURL, "/")
+	}
+
+	tempFolder := config.AppConfig.TempFolder
+	if tempFolder == "" {
+		tempFolder = "utils/temp"
+	}
+	_ = os.MkdirAll(tempFolder, 0755)
+
+	tmpFileName := fmt.Sprintf("tmp_%d.bin", time.Now().UnixNano())
+	tmpFilePath := filepath.Join(tempFolder, tmpFileName)
+
+	if err := downloadFile(imgURL, tmpFilePath); err != nil {
+		return "", err
+	}
+
+	// 嗅探文件魔数确定真实图片扩展名
+	ext := ".jpg"
+	if f, err := os.Open(tmpFilePath); err == nil {
+		header := make([]byte, 16)
+		n, _ := f.Read(header)
+		f.Close()
+		if n >= 2 && header[0] == 0xFF && header[1] == 0xD8 {
+			ext = ".jpg"
+		} else if n >= 8 && string(header[1:4]) == "PNG" {
+			ext = ".png"
+		} else if n >= 4 && string(header[0:3]) == "GIF" {
+			ext = ".gif"
+		} else if n >= 12 && string(header[0:4]) == "RIFF" && string(header[8:12]) == "WEBP" {
+			ext = ".webp"
+		} else {
+			ext = getExt(imgURL, ".jpg")
+		}
+	}
+
+	finalName := fmt.Sprintf("yh_img_%d%s", time.Now().UnixNano(), ext)
+	finalPath := filepath.Join(tempFolder, finalName)
+	if err := os.Rename(tmpFilePath, finalPath); err != nil {
+		finalPath = tmpFilePath
+	}
+
+	absPath, err := filepath.Abs(finalPath)
+	if err != nil {
+		return finalPath, nil
+	}
+	return absPath, nil
+}
+
+// replaceYunhuImagesInText searches for chat-img.jwznb.com URLs in text, downloads them, and replaces with file:/// paths.
+func replaceYunhuImagesInText(text string) (string, []string) {
+	if !strings.Contains(text, "chat-img.jwznb.com") {
+		return text, nil
+	}
+
+	var tempFiles []string
+	reImg := regexp.MustCompile(`https?://chat-img\.jwznb\.com/[^\s\)\"\'\,]+`)
+	res := reImg.ReplaceAllStringFunc(text, func(imgURL string) string {
+		localPath, err := downloadYunhuImageToLocal(imgURL)
+		if err == nil && localPath != "" {
+			tempFiles = append(tempFiles, localPath)
+			return "file:///" + filepath.ToSlash(localPath)
+		}
+		return imgURL
+	})
+	return res, tempFiles
 }
 
 func getExt(url string, defaultExt string) string {

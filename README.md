@@ -5,3 +5,4 @@ go build -o amer.exe
 
 # Hint
 WebHook has not tested
+Powered by Gemini

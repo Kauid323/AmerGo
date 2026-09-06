@@ -2,12 +2,14 @@ package qq
 
 import (
 	"amer/adapter/message"
+	"amer/config"
 	"amer/db"
 	"amer/model"
 	"encoding/json"
 	"fmt"
 	"html"
 	"log"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -48,8 +50,15 @@ func handleQQMessage(event model.OneBotEvent) {
 	senderUserIDStr := strconv.FormatInt(senderUserID, 10)
 	rawMsg := strings.TrimSpace(event.GetRawMessage())
 
+	// 提取指令与 @机器人 判定
+	isCmd, cmdText, isAtBot := CheckAndExtractQQCommand(rawMsg, botSelfID, config.AppConfig.QQ.BotQQ, config.AppConfig.QQ.BotName)
+
 	// Check for admin commands first
-	if handled, replyMsg := message.HandleAdminCommand("QQ", senderUserIDStr, rawMsg, event.Sender.Role); handled {
+	checkAdminMsg := rawMsg
+	if isCmd {
+		checkAdminMsg = cmdText
+	}
+	if handled, replyMsg := message.HandleAdminCommand("QQ", senderUserIDStr, checkAdminMsg, event.Sender.Role); handled {
 		if event.MessageType == "private" {
 			_ = GlobalOneBotServer.SendPrivateMsg(senderUserID, replyMsg)
 		} else {
@@ -75,16 +84,21 @@ func handleQQMessage(event model.OneBotEvent) {
 
 		log.Printf("[QQ Group Msg] 群 %d 来自 %s(%d): %s", groupID, event.Sender.Nickname, senderUserID, rawMsg)
 
-		// Command handling
-		if strings.HasPrefix(rawMsg, "/") {
-			cmd := strings.TrimPrefix(rawMsg, "/")
-			if handleQQCommand(event, groupIDStr, senderUserIDStr, cmd) {
+		// 优先处理群指令（无论是 /cmd 还是 @Amer /cmd 还是 @Amer cmd）
+		if isCmd {
+			cleanCmd := strings.TrimPrefix(cmdText, "/")
+			if handleQQCommand(event, groupIDStr, senderUserIDStr, cleanCmd) {
 				return
 			}
 		}
 
 		// 检查当前 QQ 群是否有处于激活同步状态的云湖绑定
 		if !db.HasActiveBinding("QQ", groupIDStr) {
+			// 未绑定有效云湖群。如果用户 @机器人 但未触发有效指令，提示绑定引导
+			if isAtBot {
+				tip := "【Amer 互通提示】当前 QQ 群尚未绑定云湖群！\n如需互通，请使用以下指令进行绑定：\n/绑定 yh <云湖群ID>\n或查看帮助：/帮助"
+				_ = GlobalOneBotServer.SendGroupMsg(groupID, tip)
+			}
 			// 未绑定有效云湖群，不进行跨平台媒体处理、上传与同步，避免浪费云湖空间与流量
 			return
 		}
@@ -517,6 +531,89 @@ func handleQQCommand(event model.OneBotEvent, groupIDStr, userIDStr, cmd string)
 	}
 
 	return false
+}
+
+var atPrefixRegex = regexp.MustCompile(`^(?:\[CQ:at,qq=([^,\]]+)(?:,[^\]]*)?\]|@([^\s/]+))\s*`)
+
+// CheckAndExtractQQCommand checks if the message starts with a command or @bot command,
+// and extracts the command text.
+func CheckAndExtractQQCommand(rawMsg string, botSelfID int64, botQQ, botName string) (isCmd bool, cmdText string, isAtBot bool) {
+	trimmed := strings.TrimSpace(rawMsg)
+	if trimmed == "" {
+		return false, "", false
+	}
+
+	// 1. Direct slash command: /绑定, /解绑, /amer-block, etc.
+	if strings.HasPrefix(trimmed, "/") {
+		return true, trimmed, false
+	}
+
+	// 2. Direct command without slash: 绑定 ..., 解绑 ..., 帮助, 绑定列表, 同步模式 ...
+	knownCommands := []string{"绑定", "解绑", "帮助", "绑定列表", "同步模式"}
+	for _, kc := range knownCommands {
+		if trimmed == kc || strings.HasPrefix(trimmed, kc+" ") {
+			return true, "/" + trimmed, false
+		}
+	}
+
+	// 3. AT prefix checking: [CQ:at,qq=...] or @Amer
+	matches := atPrefixRegex.FindStringSubmatch(trimmed)
+	if len(matches) > 0 {
+		atQQ := strings.TrimSpace(matches[1])
+		atText := strings.TrimSpace(matches[2])
+
+		botIDStr := ""
+		if botSelfID != 0 {
+			botIDStr = strconv.FormatInt(botSelfID, 10)
+		}
+		configuredBotQQ := strings.TrimSpace(botQQ)
+		configuredBotName := strings.ToLower(strings.TrimSpace(botName))
+		if configuredBotName == "" {
+			configuredBotName = "amer"
+		}
+
+		matchedBot := false
+		if atQQ != "" {
+			if (botIDStr != "" && atQQ == botIDStr) || (configuredBotQQ != "" && atQQ == configuredBotQQ) {
+				matchedBot = true
+			}
+		} else if atText != "" {
+			atLower := strings.ToLower(atText)
+			if strings.Contains(atLower, configuredBotName) || (configuredBotQQ != "" && atText == configuredBotQQ) || (botIDStr != "" && atText == botIDStr) {
+				matchedBot = true
+			}
+		}
+
+		if matchedBot {
+			isAtBot = true
+			afterAt := strings.TrimSpace(trimmed[len(matches[0]):])
+			if afterAt == "" {
+				return false, "", true
+			}
+
+			// If followed by slash command
+			if strings.HasPrefix(afterAt, "/") {
+				return true, afterAt, true
+			}
+
+			// If followed by known command without slash
+			for _, kc := range knownCommands {
+				if afterAt == kc || strings.HasPrefix(afterAt, kc+" ") {
+					return true, "/" + afterAt, true
+				}
+			}
+
+			// Check admin command without slash e.g. amer-block
+			if strings.HasPrefix(afterAt, "amer-") {
+				return true, "/" + afterAt, true
+			}
+
+			// If user @bot with some other words
+			return false, afterAt, true
+		}
+	}
+
+	return false, "", false
 }
 
 func handleQQRequest(event model.OneBotEvent) {
