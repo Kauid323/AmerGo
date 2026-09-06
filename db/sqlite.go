@@ -28,11 +28,29 @@ type BindInfoResult struct {
 	Data   map[string]interface{} `json:"data,omitempty"`
 }
 
+func CloseSQLite() error {
+	dbMu.Lock()
+	defer dbMu.Unlock()
+	if dbConn != nil {
+		err := dbConn.Close()
+		dbConn = nil
+		return err
+	}
+	return nil
+}
+
 func InitSQLite(dbPath string) error {
 	dir := filepath.Dir(dbPath)
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return fmt.Errorf("创建SQLite目录失败: %w", err)
 	}
+
+	dbMu.Lock()
+	if dbConn != nil {
+		_ = dbConn.Close()
+		dbConn = nil
+	}
+	dbMu.Unlock()
 
 	db, err := sql.Open("sqlite", dbPath)
 	if err != nil {
@@ -61,6 +79,47 @@ func InitSQLite(dbPath string) error {
 	}
 
 	return nil
+}
+
+// HasActiveBinding checks if a group has any active bindings with sync enabled.
+func HasActiveBinding(platform, id string) bool {
+	dbMu.Lock()
+	defer dbMu.Unlock()
+
+	if dbConn == nil {
+		return false
+	}
+
+	if platform == "QQ" {
+		var yhGroupIDsJSON sql.NullString
+		err := dbConn.QueryRow("SELECT YH_group_ids FROM QQ_table WHERE QQ_group_id=?", id).Scan(&yhGroupIDsJSON)
+		if err != nil || !yhGroupIDsJSON.Valid || yhGroupIDsJSON.String == "" {
+			return false
+		}
+		var yhItems []BindingItem
+		_ = json.Unmarshal([]byte(yhGroupIDsJSON.String), &yhItems)
+		for _, item := range yhItems {
+			if item.Sync {
+				return true
+			}
+		}
+		return false
+	} else if platform == "YH" {
+		var qqGroupIDsJSON sql.NullString
+		err := dbConn.QueryRow("SELECT QQ_group_ids FROM YH_table WHERE YH_group_id=?", id).Scan(&qqGroupIDsJSON)
+		if err != nil || !qqGroupIDsJSON.Valid || qqGroupIDsJSON.String == "" {
+			return false
+		}
+		var qqItems []BindingItem
+		_ = json.Unmarshal([]byte(qqGroupIDsJSON.String), &qqItems)
+		for _, item := range qqItems {
+			if item.Sync {
+				return true
+			}
+		}
+		return false
+	}
+	return false
 }
 
 func GetInfo(platform, id string) BindInfoResult {
@@ -422,4 +481,76 @@ func SetAllSync(platform, id string, syncData map[string]bool) BindInfoResult {
 	}
 
 	return BindInfoResult{Status: -1, Msg: "设置失败"}
+}
+
+type BindingDetail struct {
+	QQGroupID  string `json:"qq_group_id"`
+	YHGroupID  string `json:"yh_group_id"`
+	QQToYHSync bool   `json:"qq_to_yh_sync"`
+	YHToQQSync bool   `json:"yh_to_qq_sync"`
+	SyncMode   string `json:"sync_mode"` // "全同步", "QQ到云湖", "云湖到QQ", "停止"
+}
+
+func GetAllBindings() []BindingDetail {
+	dbMu.Lock()
+	defer dbMu.Unlock()
+
+	var result []BindingDetail
+	if dbConn == nil {
+		return result
+	}
+
+	rows, err := dbConn.Query("SELECT QQ_group_id, YH_group_ids FROM QQ_table")
+	if err != nil {
+		return result
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var qqID string
+		var yhJSON sql.NullString
+		if err := rows.Scan(&qqID, &yhJSON); err != nil {
+			continue
+		}
+
+		var yhItems []BindingItem
+		if yhJSON.Valid && yhJSON.String != "" {
+			_ = json.Unmarshal([]byte(yhJSON.String), &yhItems)
+		}
+
+		for _, item := range yhItems {
+			detail := BindingDetail{
+				QQGroupID:  qqID,
+				YHGroupID:  item.ID,
+				QQToYHSync: item.Sync,
+			}
+
+			var qqBackJSON sql.NullString
+			_ = dbConn.QueryRow("SELECT QQ_group_ids FROM YH_table WHERE YH_group_id=?", item.ID).Scan(&qqBackJSON)
+			if qqBackJSON.Valid && qqBackJSON.String != "" {
+				var qqItems []BindingItem
+				_ = json.Unmarshal([]byte(qqBackJSON.String), &qqItems)
+				for _, q := range qqItems {
+					if q.ID == qqID {
+						detail.YHToQQSync = q.Sync
+						break
+					}
+				}
+			}
+
+			if detail.QQToYHSync && detail.YHToQQSync {
+				detail.SyncMode = "全同步"
+			} else if detail.QQToYHSync && !detail.YHToQQSync {
+				detail.SyncMode = "QQ到云湖"
+			} else if !detail.QQToYHSync && detail.YHToQQSync {
+				detail.SyncMode = "云湖到QQ"
+			} else {
+				detail.SyncMode = "停止"
+			}
+
+			result = append(result, detail)
+		}
+	}
+
+	return result
 }

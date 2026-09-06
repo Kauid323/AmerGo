@@ -5,6 +5,11 @@ server:
   host: "127.0.0.1"
   port: 5888
 
+# WebUI 管理控制台自定义配置
+webui:
+  host: "0.0.0.0"
+  port: 5888 # 自定义 WebUI 监听端口，若与 server.port 相同则共用服务，不同则独立监听
+
 qq:
   admin_qq: "" # QQ管理员用户 ID
   bot_qq: "" # QQ机器人账号

@@ -2,6 +2,8 @@ package message
 
 import (
 	"amer/config"
+	"amer/model"
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -278,6 +280,185 @@ func TestUnescapeCQAndReplyWithEntities(t *testing.T) {
 	}
 	if !strings.Contains(bodyHTML, "[测试群]") {
 		t.Errorf("expected [测试群], got: %v", bodyHTML)
+	}
+}
+
+func TestCardMessageParsing(t *testing.T) {
+	// 1. 用户日志中提供的真实哔哩哔哩 QQ 小程序 JSON 卡片
+	rawJSON := `{
+  "config" : {
+    "height" : 0,
+    "forward" : 1,
+    "ctime" : 1788654502,
+    "width" : 0,
+    "type" : "normal",
+    "token" : "ab9ef7d74c00ad6f0fcf88ad2f926329",
+    "autoSize" : 0
+  },
+  "prompt" : "[QQ小程序]或许他真的是好 汉呢",
+  "app" : "com.tencent.miniapp_01",
+  "ver" : "0.0.0.1",
+  "appID" : "100951776",
+  "view" : "view_8C8E89B49BE609866298ADDFF2DBABA4",
+  "meta" : {
+    "detail_1" : {
+      "appid" : "1109937557",
+      "preview" : "https:\/\/pic.ugcimg.cn\/4292993d3d44317c187e33bc9d631f1f\/jpg1",
+      "title" : "哔哩哔哩",
+      "desc" : "或许他真的是好 汉呢",
+      "qqdocurl" : "https:\/\/b23.tv\/aogcC5V",
+      "url" : "https://b23.tv/aogcC5V"
+    }
+  }
+}`
+
+	// 直接解析
+	cardInfo := model.ParseJSONCardData(rawJSON)
+	if cardInfo == nil {
+		t.Fatalf("ParseJSONCardData returned nil")
+	}
+	if cardInfo.Tag != "QQ小程序" {
+		t.Errorf("expected Tag 'QQ小程序', got '%s'", cardInfo.Tag)
+	}
+	if cardInfo.Title != "哔哩哔哩" {
+		t.Errorf("expected Title '哔哩哔哩', got '%s'", cardInfo.Title)
+	}
+	if cardInfo.Desc != "或许他真的是好 汉呢" {
+		t.Errorf("expected Desc '或许他真的是好 汉呢', got '%s'", cardInfo.Desc)
+	}
+	if cardInfo.URL != "https://b23.tv/aogcC5V" {
+		t.Errorf("expected URL 'https://b23.tv/aogcC5V', got '%s'", cardInfo.URL)
+	}
+	if cardInfo.Preview != "https://pic.ugcimg.cn/4292993d3d44317c187e33bc9d631f1f/jpg1" {
+		t.Errorf("expected Preview 'https://pic.ugcimg.cn/4292993d3d44317c187e33bc9d631f1f/jpg1', got '%s'", cardInfo.Preview)
+	}
+
+	// 测试 CQ 码生成
+	cqCard := model.FormatCardSegment(cardInfo)
+	if !strings.HasPrefix(cqCard, "[CQ:card,") {
+		t.Errorf("FormatCardSegment got %s", cqCard)
+	}
+
+	// 测试 CQ:json 在 FormatCQAtText 转换为纯文本
+	rawCQMsg := fmt.Sprintf("[CQ:json,data=%s]", rawJSON)
+	textGot := FormatCQAtText(rawCQMsg, 0)
+	if !strings.Contains(textGot, "「QQ小程序 · 哔哩哔哩」") {
+		t.Errorf("FormatCQAtText missing header, got: %s", textGot)
+	}
+	if !strings.Contains(textGot, "或许他真的是好 汉呢") {
+		t.Errorf("FormatCQAtText missing desc, got: %s", textGot)
+	}
+	if !strings.Contains(textGot, "https://b23.tv/aogcC5V") {
+		t.Errorf("FormatCQAtText missing url, got: %s", textGot)
+	}
+
+	// 测试 CQ:json 在 CQToHTMLWithGroup 转换为 HTML 卡片
+	htmlGot := CQToHTMLWithGroup(rawCQMsg, 0)
+	if !strings.Contains(htmlGot, "QQ小程序") || !strings.Contains(htmlGot, "哔哩哔哩") {
+		t.Errorf("CQToHTMLWithGroup missing badge/title: %s", htmlGot)
+	}
+	if !strings.Contains(htmlGot, "或许他真的是好 汉呢") {
+		t.Errorf("CQToHTMLWithGroup missing desc: %s", htmlGot)
+	}
+	if !strings.Contains(htmlGot, "https://b23.tv/aogcC5V") {
+		t.Errorf("CQToHTMLWithGroup missing link: %s", htmlGot)
+	}
+	if !strings.Contains(htmlGot, "https://pic.ugcimg.cn/4292993d3d44317c187e33bc9d631f1f/jpg1") {
+		t.Errorf("CQToHTMLWithGroup missing image: %s", htmlGot)
+	}
+
+	// 2. 测试 XML 卡片解析
+	xmlData := `<?xml version='1.0' encoding='UTF-8' standalone='yes' ?><msg serviceID="1" templateID="1" action="web" brief="[分享] 测试标题" url="https://example.com"><item layout="2"><title>测试标题</title><summary>测试内容摘要</summary><picture cover="https://example.com/cover.png"/></item><source name="测试来源"/></msg>`
+	xmlCQ := fmt.Sprintf("[CQ:xml,data=%s]", xmlData)
+
+	xmlText := FormatCQAtText(xmlCQ, 0)
+	if !strings.Contains(xmlText, "「分享 · 测试标题」") || !strings.Contains(xmlText, "测试内容摘要") {
+		t.Errorf("XML FormatCQAtText failed, got: %s", xmlText)
+	}
+
+	xmlHTML := CQToHTMLWithGroup(xmlCQ, 0)
+	if !strings.Contains(xmlHTML, "测试标题") || !strings.Contains(xmlHTML, "https://example.com/cover.png") {
+		t.Errorf("XML CQToHTMLWithGroup failed, got: %s", xmlHTML)
+	}
+}
+
+func TestFileMessageRendering(t *testing.T) {
+	// 1. FormatFileSize
+	if got := FormatFileSize(69528934); got != "66.3 MB" {
+		t.Errorf("FormatFileSize(69528934) = %s, want 66.3 MB", got)
+	}
+	if got := FormatFileSize(1024); got != "1.0 KB" {
+		t.Errorf("FormatFileSize(1024) = %s, want 1.0 KB", got)
+	}
+	if got := FormatFileSize(500); got != "500 B" {
+		t.Errorf("FormatFileSize(500) = %s, want 500 B", got)
+	}
+
+	// 2. RenderFileHTML
+	htmlOut := RenderFileHTML("QQ20260906-085033.mp4", "69528934", "https://example.com/download")
+	if !strings.Contains(htmlOut, "QQ20260906-085033.mp4") {
+		t.Errorf("missing filename in html: %s", htmlOut)
+	}
+	if !strings.Contains(htmlOut, "66.3 MB") {
+		t.Errorf("missing formatted size in html: %s", htmlOut)
+	}
+	if !strings.Contains(htmlOut, "https://example.com/download") {
+		t.Errorf("missing url in html: %s", htmlOut)
+	}
+	if !strings.Contains(htmlOut, "下载文件") {
+		t.Errorf("missing download button in html: %s", htmlOut)
+	}
+
+	// 3. RenderFileText
+	textOut := RenderFileText("QQ20260906-085033.mp4", "69528934", "https://example.com/download")
+	if !strings.Contains(textOut, "📁 [文件] QQ20260906-085033.mp4 (66.3 MB)") {
+		t.Errorf("textOut format mismatch: %s", textOut)
+	}
+	if !strings.Contains(textOut, "🔗 下载链接: https://example.com/download") {
+		t.Errorf("textOut missing download link: %s", textOut)
+	}
+
+	// 4. CQToHTMLWithGroup with [CQ:file,...]
+	cqMsg := "[CQ:file,name=QQ20260906-085033.mp4,size=69528934,url=https://example.com/test.mp4]"
+	cqHTML := CQToHTMLWithGroup(cqMsg, 0)
+	if !strings.Contains(cqHTML, "QQ20260906-085033.mp4") || !strings.Contains(cqHTML, "66.3 MB") {
+		t.Errorf("CQToHTMLWithGroup failed on file: %s", cqHTML)
+	}
+
+	// 5. FormatCQAtText with [CQ:file,...]
+	cqText := FormatCQAtText(cqMsg, 0)
+	if !strings.Contains(cqText, "📁 [文件] QQ20260906-085033.mp4") || !strings.Contains(cqText, "🔗 下载链接: https://example.com/test.mp4") {
+		t.Errorf("FormatCQAtText failed on file: %s", cqText)
+	}
+}
+
+type trackYHSender struct {
+	mockYHSender
+	uploadCalled bool
+}
+
+func (m *trackYHSender) UploadImage(imgData []byte, filename string) (string, error) {
+	m.uploadCalled = true
+	return "https://chat-img.jwznb.com/uploaded.jpg", nil
+}
+
+func TestUnboundGroupDoesNotUploadMedia(t *testing.T) {
+	trackSender := &trackYHSender{}
+	RegisterYHSender(trackSender)
+	defer func() {
+		GlobalYHSender = nil
+	}()
+
+	// 999999999 是未绑定的群号，ProcessCQImageWithGroup 必须直接返回原外链，且不能调用 UploadImage
+	unboundGroupID := int64(999999999)
+	imgURL := "https://example.com/test_image.jpg"
+	res := ProcessCQImageWithGroup(imgURL, "sample_file", unboundGroupID)
+
+	if trackSender.uploadCalled {
+		t.Errorf("UploadImage should NOT be called for unbound group!")
+	}
+	if !strings.Contains(res, imgURL) {
+		t.Errorf("expected original imgURL in html, got: %s", res)
 	}
 }
 

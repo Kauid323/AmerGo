@@ -57,6 +57,11 @@ type Config struct {
 		MaxWidth  int     `yaml:"max_width"`  // 最大显示宽度 (px)，默认 300
 		MaxHeight int     `yaml:"max_height"` // 最大显示高度 (px)，默认 320
 	} `yaml:"image"`
+
+	WebUI struct {
+		Host string `yaml:"host"` // WebUI 监听地址，为空则继承 server.host
+		Port int    `yaml:"port"` // WebUI 监听端口，为 0 则继承 server.port
+	} `yaml:"webui"`
 }
 
 var AppConfig Config
@@ -86,6 +91,12 @@ func LoadConfig(path string) (*Config, error) {
 	}
 	if cfg.Image.MaxHeight <= 0 {
 		cfg.Image.MaxHeight = 320
+	}
+	if cfg.WebUI.Port == 0 {
+		cfg.WebUI.Port = cfg.Server.Port
+	}
+	if cfg.WebUI.Host == "" {
+		cfg.WebUI.Host = cfg.Server.Host
 	}
 
 	AppConfig = cfg

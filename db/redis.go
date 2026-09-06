@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"strings"
 	"sync"
 	"time"
 
@@ -149,10 +150,25 @@ func GetYunhuMsgCache(keyMsgID string) (realYHMsgID, chatID, chatType, senderID 
 	return data.RealMsgID, data.ChatID, data.ChatType, data.SenderID, true
 }
 
+var (
+	memoryBlacklistStore  sync.Map
+	memoryBlacklistExpire sync.Map
+)
+
 func AddToBlacklist(userID string, reason string, duration int) error {
 	key := fmt.Sprintf("blacklist:%s", userID)
 	notifiedKey := fmt.Sprintf("blacklist_notified:%s", userID)
 	expireKey := fmt.Sprintf("blacklist_expire:%s", userID)
+
+	now := time.Now().Unix()
+	var expireTime int64
+	if duration > 0 {
+		expireTime = now + int64(duration)
+		memoryBlacklistExpire.Store(userID, expireTime)
+	} else {
+		memoryBlacklistExpire.Delete(userID)
+	}
+	memoryBlacklistStore.Store(userID, reason)
 
 	if RDB != nil {
 		_ = RDB.Set(Ctx, key, reason, 0).Err()
@@ -160,7 +176,6 @@ func AddToBlacklist(userID string, reason string, duration int) error {
 
 		if duration > 0 {
 			dur := time.Duration(duration) * time.Second
-			expireTime := time.Now().Unix() + int64(duration)
 			_ = RDB.Set(Ctx, expireKey, expireTime, dur).Err()
 			_ = RDB.Expire(Ctx, key, dur).Err()
 			_ = RDB.Expire(Ctx, notifiedKey, dur).Err()
@@ -173,6 +188,9 @@ func AddToBlacklist(userID string, reason string, duration int) error {
 }
 
 func RemoveFromBlacklist(userID string) error {
+	memoryBlacklistStore.Delete(userID)
+	memoryBlacklistExpire.Delete(userID)
+
 	if RDB == nil {
 		return nil
 	}
@@ -184,6 +202,24 @@ func RemoveFromBlacklist(userID string) error {
 
 func IsInBlacklist(userID string) (BlacklistStatus, error) {
 	if RDB == nil {
+		if val, ok := memoryBlacklistStore.Load(userID); ok {
+			reason := val.(string)
+			var remainingTime int64
+			if expVal, ok := memoryBlacklistExpire.Load(userID); ok {
+				expTime := expVal.(int64)
+				now := time.Now().Unix()
+				if expTime > 0 && now > expTime {
+					_ = RemoveFromBlacklist(userID)
+					return BlacklistStatus{IsBanned: false}, nil
+				}
+				remainingTime = expTime - now
+			}
+			return BlacklistStatus{
+				IsBanned:      true,
+				Reason:        reason,
+				RemainingTime: remainingTime,
+			}, nil
+		}
 		return BlacklistStatus{IsBanned: false}, nil
 	}
 	key := fmt.Sprintf("blacklist:%s", userID)
@@ -212,6 +248,59 @@ func IsInBlacklist(userID string) (BlacklistStatus, error) {
 		Reason:        reason,
 		RemainingTime: remainingTime,
 	}, nil
+}
+
+type BlacklistItem struct {
+	UserID        string `json:"user_id"`
+	Reason        string `json:"reason"`
+	RemainingTime int64  `json:"remaining_time"`
+}
+
+func GetBlacklist() []BlacklistItem {
+	var list []BlacklistItem
+	userMap := make(map[string]bool)
+
+	if RDB != nil {
+		keys, err := RDB.Keys(Ctx, "blacklist:*").Result()
+		if err == nil {
+			for _, k := range keys {
+				if strings.HasPrefix(k, "blacklist_notified:") || strings.HasPrefix(k, "blacklist_expire:") {
+					continue
+				}
+				uid := strings.TrimPrefix(k, "blacklist:")
+				if uid != "" && !userMap[uid] {
+					userMap[uid] = true
+					status, _ := IsInBlacklist(uid)
+					if status.IsBanned {
+						list = append(list, BlacklistItem{
+							UserID:        uid,
+							Reason:        status.Reason,
+							RemainingTime: status.RemainingTime,
+						})
+					}
+				}
+			}
+		}
+	}
+
+	// 补充内存中的黑名单项
+	memoryBlacklistStore.Range(func(key, value interface{}) bool {
+		uid := key.(string)
+		if !userMap[uid] {
+			userMap[uid] = true
+			status, _ := IsInBlacklist(uid)
+			if status.IsBanned {
+				list = append(list, BlacklistItem{
+					UserID:        uid,
+					Reason:        status.Reason,
+					RemainingTime: status.RemainingTime,
+				})
+			}
+		}
+		return true
+	})
+
+	return list
 }
 
 func DetectMessageFrequency(platform, userID string, threshold int, timeWindow int) bool {

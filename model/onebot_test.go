@@ -74,3 +74,82 @@ func TestGetRawMessageWithRichSegments(t *testing.T) {
 		t.Errorf("missing keyboard in rawMsg: %s", rawMsg)
 	}
 }
+
+func TestGetRawMessageWithJSONCard(t *testing.T) {
+	rawJSON := `{
+		"raw_message": "[CQ:json,data={\"app\":\"com.tencent.miniapp_01\",\"meta\":{\"detail_1\":{\"title\":\"哔哩哔哩\",\"desc\":\"或许他真的是好 汉呢\",\"qqdocurl\":\"https://b23.tv/aogcC5V\"}}}]",
+		"message": [
+			{
+				"type": "json",
+				"data": {
+					"data": "{\"app\":\"com.tencent.miniapp_01\",\"prompt\":\"[QQ小程序]或许他真的是好 汉呢\",\"meta\":{\"detail_1\":{\"title\":\"哔哩哔哩\",\"desc\":\"或许他真的是好 汉呢\",\"qqdocurl\":\"https://b23.tv/aogcC5V\",\"preview\":\"https://pic.ugcimg.cn/test.jpg\"}}}"
+				}
+			}
+		]
+	}`
+
+	var event OneBotEvent
+	if err := json.Unmarshal([]byte(rawJSON), &event); err != nil {
+		t.Fatalf("json unmarshal failed: %v", err)
+	}
+
+	rawMsg := event.GetRawMessage()
+	if !strings.HasPrefix(rawMsg, "[CQ:card,") {
+		t.Errorf("expected parsed CQ:card, got: %s", rawMsg)
+	}
+	if !strings.Contains(rawMsg, "title=哔哩哔哩") {
+		t.Errorf("missing title in rawMsg: %s", rawMsg)
+	}
+	if !strings.Contains(rawMsg, "tag=QQ小程序") {
+		t.Errorf("missing tag in rawMsg: %s", rawMsg)
+	}
+	if !strings.Contains(rawMsg, "url=https://b23.tv/aogcC5V") {
+		t.Errorf("missing url in rawMsg: %s", rawMsg)
+	}
+}
+
+func TestGetRawMessageWithFileSegment(t *testing.T) {
+	rawJSON := `{
+		"time": 1788656123,
+		"self_id": 3218936228,
+		"post_type": "message",
+		"message_type": "group",
+		"sub_type": "normal",
+		"message_id": 1710849642,
+		"group_id": 929814964,
+		"user_id": 171989292,
+		"message": [
+			{
+				"type": "file",
+				"data": {
+					"file": "QQ20260906-085033.mp4",
+					"file_id": "/0099084d-ea23-4497-b796-83677e49acd1",
+					"file_size": 69528934,
+					"name": "QQ20260906-085033.mp4",
+					"size": 69528934,
+					"url": "https://gzc-download.ftn.qq.com/ftn_handler/test"
+				}
+			}
+		],
+		"raw_message": "[CQ:file,name=QQ20260906-085033.mp4]"
+	}`
+
+	var event OneBotEvent
+	if err := json.Unmarshal([]byte(rawJSON), &event); err != nil {
+		t.Fatalf("json unmarshal failed: %v", err)
+	}
+
+	rawMsg := event.GetRawMessage()
+	if !strings.HasPrefix(rawMsg, "[CQ:file,") {
+		t.Errorf("expected [CQ:file, got: %s", rawMsg)
+	}
+	if !strings.Contains(rawMsg, "name=QQ20260906-085033.mp4") {
+		t.Errorf("missing name in rawMsg: %s", rawMsg)
+	}
+	if !strings.Contains(rawMsg, "size=69528934") {
+		t.Errorf("missing size in rawMsg: %s", rawMsg)
+	}
+	if !strings.Contains(rawMsg, "url=https://gzc-download.ftn.qq.com/ftn_handler/test") {
+		t.Errorf("missing url in rawMsg: %s", rawMsg)
+	}
+}

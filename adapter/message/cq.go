@@ -2,6 +2,8 @@ package message
 
 import (
 	"amer/config"
+	"amer/db"
+	"amer/model"
 	"bytes"
 	"encoding/base64"
 	"encoding/binary"
@@ -205,6 +207,11 @@ func downloadImageData(imgURL string) ([]byte, string, error) {
 
 // ProcessCQImage downloads QQ image, uploads to Yunhu image CDN, and returns <img> tag with resolution-scaled dimensions.
 func ProcessCQImage(imgURL, fileVal string) string {
+	return ProcessCQImageWithGroup(imgURL, fileVal, 0)
+}
+
+// ProcessCQImageWithGroup downloads QQ image and uploads to Yunhu only if group has active binding.
+func ProcessCQImageWithGroup(imgURL, fileVal string, groupID int64) string {
 	if imgURL == "" && fileVal != "" {
 		if strings.HasPrefix(fileVal, "http://") || strings.HasPrefix(fileVal, "https://") {
 			imgURL = fileVal
@@ -214,6 +221,11 @@ func ProcessCQImage(imgURL, fileVal string) string {
 		return "[图片]"
 	}
 	imgURL = html.UnescapeString(imgURL)
+
+	// 如果指定了 groupID 且该群没有绑定任何有效且开启同步的云湖群，则绝不上载至云湖图床
+	if groupID != 0 && !db.HasActiveBinding("QQ", strconv.FormatInt(groupID, 10)) {
+		return formatImageHTML(imgURL, 0, 0)
+	}
 
 	cacheKey := fileVal
 	if cacheKey == "" {
@@ -301,6 +313,177 @@ func UnescapeCQ(s string) string {
 	return s
 }
 
+// RenderCardHTML renders a CardInfo (or parameters from CQ code) into a modern, compact HTML card.
+func RenderCardHTML(tag, title, desc, preview, url string) string {
+	tag = html.EscapeString(UnescapeCQ(strings.TrimSpace(tag)))
+	title = html.EscapeString(UnescapeCQ(strings.TrimSpace(title)))
+	desc = html.EscapeString(UnescapeCQ(strings.TrimSpace(desc)))
+	preview = strings.TrimSpace(UnescapeCQ(preview))
+	url = strings.TrimSpace(UnescapeCQ(url))
+
+	if tag == "" && title == "" && desc == "" && preview == "" && url == "" {
+		return "[卡片分享]"
+	}
+
+	var sb strings.Builder
+	sb.WriteString(`<div style="background:#f8f9fa;border-left:3px solid #007bff;padding:5px 8px;border-radius:4px;margin:3px 0;font-size:12px;line-height:1.4;">`)
+
+	// 标题行
+	if tag != "" || title != "" {
+		sb.WriteString(`<div style="display:flex;align-items:center;gap:4px;margin-bottom:2px;">`)
+		if tag != "" {
+			sb.WriteString(fmt.Sprintf(`<span style="background:#e0f2fe;color:#0284c7;padding:1px 5px;border-radius:3px;font-size:10px;font-weight:600;">%s</span>`, tag))
+		}
+		if title != "" {
+			sb.WriteString(fmt.Sprintf(`<span style="font-weight:600;color:#333;font-size:12px;">%s</span>`, title))
+		}
+		sb.WriteString(`</div>`)
+	}
+
+	// 描述内容
+	if desc != "" {
+		sb.WriteString(fmt.Sprintf(`<div style="color:#444;font-size:12px;margin-bottom:3px;word-break:break-word;">%s</div>`, desc))
+	}
+
+	// 缩略图
+	if preview != "" {
+		sb.WriteString(fmt.Sprintf(`<img src="%s" style="max-width:180px;max-height:100px;object-fit:cover;border-radius:4px;display:block;margin:3px 0;">`, preview))
+	}
+
+	// 链接
+	if url != "" {
+		sb.WriteString(fmt.Sprintf(`<a href="%s" target="_blank" style="color:#2563eb;text-decoration:none;font-size:11px;display:inline-flex;align-items:center;gap:2px;">🔗 查看详情</a>`, url))
+	}
+
+	sb.WriteString(`</div>`)
+	return sb.String()
+}
+
+// RenderCardText formats card attributes into a clean, readable text representation.
+func RenderCardText(tag, title, desc, preview, url string) string {
+	tag = UnescapeCQ(strings.TrimSpace(tag))
+	title = UnescapeCQ(strings.TrimSpace(title))
+	desc = UnescapeCQ(strings.TrimSpace(desc))
+	url = UnescapeCQ(strings.TrimSpace(url))
+
+	var headerParts []string
+	if tag != "" {
+		headerParts = append(headerParts, tag)
+	}
+	if title != "" && title != tag {
+		headerParts = append(headerParts, title)
+	}
+
+	header := ""
+	if len(headerParts) > 0 {
+		header = fmt.Sprintf("「%s」", strings.Join(headerParts, " · "))
+	}
+
+	var lines []string
+	if header != "" && desc != "" {
+		lines = append(lines, fmt.Sprintf("%s %s", header, desc))
+	} else if header != "" {
+		lines = append(lines, header)
+	} else if desc != "" {
+		lines = append(lines, desc)
+	}
+
+	if url != "" {
+		lines = append(lines, fmt.Sprintf("🔗 链接: %s", url))
+	}
+
+	if len(lines) == 0 {
+		return "[卡片分享]"
+	}
+	return strings.Join(lines, "\n")
+}
+
+// FormatFileSize formats byte count to readable string like "66.3 MB"
+func FormatFileSize(sizeBytes int64) string {
+	if sizeBytes <= 0 {
+		return ""
+	}
+	const (
+		kb = 1024
+		mb = 1024 * kb
+		gb = 1024 * mb
+	)
+	switch {
+	case sizeBytes >= gb:
+		return fmt.Sprintf("%.2f GB", float64(sizeBytes)/float64(gb))
+	case sizeBytes >= mb:
+		return fmt.Sprintf("%.1f MB", float64(sizeBytes)/float64(mb))
+	case sizeBytes >= kb:
+		return fmt.Sprintf("%.1f KB", float64(sizeBytes)/float64(kb))
+	default:
+		return fmt.Sprintf("%d B", sizeBytes)
+	}
+}
+
+// FormatFileSizeStr converts raw size string (bytes) to human-readable format
+func FormatFileSizeStr(sizeStr string) string {
+	sizeStr = strings.TrimSpace(sizeStr)
+	if sizeStr == "" {
+		return ""
+	}
+	sz, err := strconv.ParseInt(sizeStr, 10, 64)
+	if err == nil && sz > 0 {
+		return FormatFileSize(sz)
+	}
+	if fsz, err := strconv.ParseFloat(sizeStr, 64); err == nil && fsz > 0 {
+		return FormatFileSize(int64(fsz))
+	}
+	return sizeStr
+}
+
+// RenderFileHTML formats a file transfer message into a clean, flat HTML card for Yunhu
+func RenderFileHTML(name, sizeStr, fileURL string) string {
+	name = html.EscapeString(UnescapeCQ(strings.TrimSpace(name)))
+	if name == "" {
+		name = "未知文件"
+	}
+	fileURL = strings.TrimSpace(UnescapeCQ(fileURL))
+	readableSize := FormatFileSizeStr(sizeStr)
+
+	var sb strings.Builder
+	sb.WriteString(`<div style="background:#f8f9fa;border:1px solid #e2e8f0;border-left:3px solid #2563eb;border-radius:4px;padding:6px 10px;margin:3px 0;display:flex;align-items:center;justify-content:space-between;gap:8px;">`)
+	sb.WriteString(`<div style="display:flex;align-items:center;gap:6px;min-width:0;flex:1;">`)
+	sb.WriteString(`<span style="font-size:18px;line-height:1;">📁</span>`)
+	sb.WriteString(`<div style="min-width:0;flex:1;">`)
+	sb.WriteString(fmt.Sprintf(`<div style="font-weight:600;font-size:12px;color:#1e293b;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">%s</div>`, name))
+	if readableSize != "" {
+		sb.WriteString(fmt.Sprintf(`<div style="font-size:11px;color:#64748b;margin-top:1px;">%s</div>`, readableSize))
+	}
+	sb.WriteString(`</div></div>`)
+
+	if fileURL != "" {
+		sb.WriteString(fmt.Sprintf(`<a href="%s" target="_blank" style="background:#2563eb;color:#ffffff;text-decoration:none;font-size:11px;font-weight:500;padding:3px 8px;border-radius:4px;white-space:nowrap;display:inline-block;">下载文件</a>`, html.EscapeString(fileURL)))
+	}
+	sb.WriteString(`</div>`)
+
+	return sb.String()
+}
+
+// RenderFileText formats file info into clean plain text
+func RenderFileText(name, sizeStr, fileURL string) string {
+	name = UnescapeCQ(strings.TrimSpace(name))
+	if name == "" {
+		name = "未知文件"
+	}
+	fileURL = UnescapeCQ(strings.TrimSpace(fileURL))
+	readableSize := FormatFileSizeStr(sizeStr)
+
+	fileTag := fmt.Sprintf("📁 [文件] %s", name)
+	if readableSize != "" {
+		fileTag += fmt.Sprintf(" (%s)", readableSize)
+	}
+
+	if fileURL != "" {
+		return fmt.Sprintf("%s\n🔗 下载链接: %s", fileTag, fileURL)
+	}
+	return fileTag
+}
+
 // CQToHTML converts OneBot CQ codes in a message string to HTML elements for display in Yunhu HTML messages.
 func CQToHTML(msg string) string {
 	return CQToHTMLWithGroup(msg, 0)
@@ -308,6 +491,7 @@ func CQToHTML(msg string) string {
 
 // CQToHTMLWithGroup converts OneBot CQ codes in a message string to HTML elements, resolving @ mentions with group member nicknames/cards.
 func CQToHTMLWithGroup(msg string, groupID int64) string {
+	msg = model.ReplaceCardCQ(msg)
 	re := regexp.MustCompile(`\[CQ:([a-zA-Z0-9_-]+)(?:,([^\]]*))?\]`)
 	res := re.ReplaceAllStringFunc(msg, func(cq string) string {
 		matches := re.FindStringSubmatch(cq)
@@ -325,7 +509,16 @@ func CQToHTMLWithGroup(msg string, groupID int64) string {
 		case "image":
 			imgURL := params["url"]
 			fileVal := params["file"]
-			return ProcessCQImage(imgURL, fileVal)
+			return ProcessCQImageWithGroup(imgURL, fileVal, groupID)
+
+		case "file":
+			fileName := params["name"]
+			if fileName == "" {
+				fileName = params["file"]
+			}
+			sizeStr := params["size"]
+			fileURL := params["url"]
+			return RenderFileHTML(fileName, sizeStr, fileURL)
 
 		case "at":
 			qq := params["qq"]
@@ -413,6 +606,36 @@ func CQToHTMLWithGroup(msg string, groupID int64) string {
 				return CQToHTMLWithGroup(contentVal, groupID)
 			}
 			return ""
+
+		case "card":
+			tag := params["tag"]
+			title := params["title"]
+			desc := params["desc"]
+			preview := params["preview"]
+			url := params["url"]
+			return RenderCardHTML(tag, title, desc, preview, url)
+
+		case "json":
+			rawJSON := params["data"]
+			if rawJSON == "" {
+				rawJSON = cq
+			}
+			card := model.ParseJSONCardData(rawJSON)
+			if card != nil {
+				return RenderCardHTML(card.Tag, card.Title, card.Desc, card.Preview, card.URL)
+			}
+			return "[卡片分享]"
+
+		case "xml":
+			rawXML := params["data"]
+			if rawXML == "" {
+				rawXML = cq
+			}
+			card := model.ParseXMLCardData(rawXML)
+			if card != nil {
+				return RenderCardHTML(card.Tag, card.Title, card.Desc, card.Preview, card.URL)
+			}
+			return "[卡片分享]"
 
 		default:
 			return fmt.Sprintf("[%s消息]", cqType)
@@ -901,6 +1124,40 @@ func ExtractForwardID(msg string) string {
 
 // FormatCQAtText replaces [CQ:at,qq=xxx] in plain text messages with @MemberName for clearer readability.
 func FormatCQAtText(msg string, groupID int64) string {
+	msg = model.ReplaceCardCQ(msg)
+
+	// 格式化 card 卡片消息为友好纯文本标记
+	reCard := regexp.MustCompile(`\[CQ:card(?:,([^\]]*))?\]`)
+	msg = reCard.ReplaceAllStringFunc(msg, func(cq string) string {
+		matches := reCard.FindStringSubmatch(cq)
+		paramStr := ""
+		if len(matches) >= 2 {
+			paramStr = matches[1]
+		}
+		params := parseCQParams(paramStr)
+		text := RenderCardText(params["tag"], params["title"], params["desc"], params["preview"], params["url"])
+		return "\n" + text + "\n"
+	})
+
+	// 格式化 file 文件消息为友好纯文本标记
+	reFile := regexp.MustCompile(`\[CQ:file(?:,([^\]]*))?\]`)
+	msg = reFile.ReplaceAllStringFunc(msg, func(cq string) string {
+		matches := reFile.FindStringSubmatch(cq)
+		paramStr := ""
+		if len(matches) >= 2 {
+			paramStr = matches[1]
+		}
+		params := parseCQParams(paramStr)
+		fileName := params["name"]
+		if fileName == "" {
+			fileName = params["file"]
+		}
+		sizeStr := params["size"]
+		fileURL := params["url"]
+		text := RenderFileText(fileName, sizeStr, fileURL)
+		return "\n" + text + "\n"
+	})
+
 	// 格式化 inline_keyboard 按钮为友好纯文本标记
 	reKeyboard := regexp.MustCompile(`\[CQ:inline_keyboard,buttons=([^\]]+)\]`)
 	msg = reKeyboard.ReplaceAllStringFunc(msg, func(cq string) string {

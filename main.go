@@ -12,6 +12,8 @@ import (
 )
 
 func main() {
+	web.InitLogCollector(2000)
+
 	log.Println("==========================================")
 	log.Println("        Amer Golang 机器人启动中...        ")
 	log.Println("==========================================")

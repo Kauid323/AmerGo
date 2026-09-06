@@ -83,6 +83,12 @@ func handleQQMessage(event model.OneBotEvent) {
 			}
 		}
 
+		// 检查当前 QQ 群是否有处于激活同步状态的云湖绑定
+		if !db.HasActiveBinding("QQ", groupIDStr) {
+			// 未绑定有效云湖群，不进行跨平台媒体处理、上传与同步，避免浪费云湖空间与流量
+			return
+		}
+
 		groupName := GlobalOneBotServer.GetGroupName(groupID)
 
 		// 自动更新发言人名称到本地缓存并优先获取群名片
@@ -189,7 +195,20 @@ func parseNodeContent(content interface{}, groupID int64) string {
 				case "image":
 					imgURL, _ := dataMap["url"].(string)
 					fileVal, _ := dataMap["file"].(string)
-					sb.WriteString(message.ProcessCQImage(imgURL, fileVal))
+					sb.WriteString(message.ProcessCQImageWithGroup(imgURL, fileVal, groupID))
+				case "file":
+					name, _ := dataMap["name"].(string)
+					if name == "" {
+						name, _ = dataMap["file"].(string)
+					}
+					url, _ := dataMap["url"].(string)
+					sizeStr := ""
+					if sz, ok := dataMap["size"]; ok && sz != nil {
+						sizeStr = model.FormatIntOrFloat(sz)
+					} else if sz, ok := dataMap["file_size"]; ok && sz != nil {
+						sizeStr = model.FormatIntOrFloat(sz)
+					}
+					sb.WriteString(message.RenderFileHTML(name, sizeStr, url))
 				case "at":
 					qqVal, _ := dataMap["qq"].(string)
 					displayName := qqVal
@@ -234,6 +253,26 @@ func parseNodeContent(content interface{}, groupID int64) string {
 						} else {
 							sb.WriteString(`<div style="background-color: #f1f3f5; border-left: 3px solid #007bff; padding: 4px 8px; margin-bottom: 6px; border-radius: 2px 4px 4px 2px; font-size: 12px; color: #666;"><strong style="color: #007bff;">[引用消息]</strong></div>`)
 						}
+					}
+				case "json":
+					cardInfo := model.ParseJSONCardData(dataMap)
+					if cardInfo != nil {
+						cqCard := model.FormatCardSegment(cardInfo)
+						sb.WriteString(message.CQToHTMLWithGroup(cqCard, groupID))
+					} else {
+						sb.WriteString("[卡片分享]")
+					}
+				case "xml":
+					rawXML := ""
+					if dStr, ok := dataMap["data"].(string); ok {
+						rawXML = dStr
+					}
+					cardInfo := model.ParseXMLCardData(rawXML)
+					if cardInfo != nil {
+						cqCard := model.FormatCardSegment(cardInfo)
+						sb.WriteString(message.CQToHTMLWithGroup(cqCard, groupID))
+					} else {
+						sb.WriteString("[卡片分享]")
 					}
 				default:
 					sb.WriteString(fmt.Sprintf("[%s消息]", elemType))
@@ -609,6 +648,31 @@ func handleQQNotice(event model.OneBotEvent) {
 	case "group_decrease":
 		log.Printf("[QQ Notice] 群成员减少 (群: %d, 用户: %d, 操作者: %d, 子类型: %s)",
 			event.GroupID.Int64(), event.UserID.Int64(), event.OperatorID.Int64(), event.SubType)
+	case "group_upload":
+		groupID := event.GroupID.Int64()
+		groupIDStr := strconv.FormatInt(groupID, 10)
+		log.Printf("[QQ Notice] 群文件上传通知 (群: %d, 用户: %d, 文件名: %s, 大小: %d)",
+			groupID, event.UserID.Int64(), event.File.Name, event.File.Size.Int64())
+		if db.HasActiveBinding("QQ", groupIDStr) && event.File.Name != "" {
+			senderUID := event.UserID.Int64()
+			senderUIDStr := strconv.FormatInt(senderUID, 10)
+			senderName := GlobalOneBotServer.GetGroupMemberName(groupID, senderUID)
+			if senderName == "" {
+				senderName = senderUIDStr
+			}
+			groupName := GlobalOneBotServer.GetGroupName(groupID)
+			fileSizeStr := strconv.FormatInt(event.File.Size.Int64(), 10)
+			fileHTML := message.RenderFileHTML(event.File.Name, fileSizeStr, event.File.URL)
+			textMsg := message.RenderFileText(event.File.Name, fileSizeStr, event.File.URL)
+
+			avatarURL := fmt.Sprintf("http://q1.qlogo.cn/g?b=qq&nk=%d&s=100", senderUID)
+			contentHTML := fmt.Sprintf(
+				`<div style="display:flex;align-items:center;gap:6px;margin-bottom:3px;"><img src="%s" style="width:24px;height:24px;border-radius:50%%;"><span style="font-size:13px;font-weight:600;color:#333;">%s</span><span style="font-size:11px;color:#888;">(%s)</span></div><div style="background:#f8f9fa;padding:5px 8px;border-radius:5px;font-size:13px;color:#111;line-height:1.4;word-break:break-word;">%s</div><div style="font-size:11px;color:#999;margin-top:2px;"><details><summary style="cursor:pointer;color:#2563eb;font-size:11px;">详情</summary><div style="padding:2px 0;line-height:1.3;">群: %s | ID: %s | %s</div></details></div>`,
+				avatarURL, html.EscapeString(senderName), senderUIDStr, fileHTML, groupName, groupIDStr, time.Now().Format("2006-01-02 15:04:05"),
+			)
+			contentHTML = message.CompressHTML(contentHTML)
+			message.SendToAllBindings("QQ", groupIDStr, "html", textMsg, senderUIDStr, senderName, contentHTML, "")
+		}
 	default:
 		log.Printf("[QQ Notice] 收到通知事件: %s (子类型: %s)", noticeType, event.SubType)
 	}
