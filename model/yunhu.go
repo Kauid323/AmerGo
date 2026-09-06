@@ -84,6 +84,48 @@ func (c *YunhuContent) GetFormFieldVal(fieldID string) (interface{}, bool) {
 	return nil, false
 }
 
+// GetFormFieldByFuzzyLabel looks up a field value whose label contains any of the keywords
+func (c *YunhuContent) GetFormFieldByFuzzyLabel(keywords ...string) string {
+	if c.FormJson == nil {
+		return ""
+	}
+	for _, item := range c.FormJson {
+		if m, ok := item.(map[string]interface{}); ok {
+			label, _ := m["label"].(string)
+			id, _ := m["id"].(string)
+			for _, kw := range keywords {
+				if (label != "" && strings.Contains(label, kw)) || (id != "" && strings.EqualFold(id, kw)) {
+					if sval, ok := m["selectValue"]; ok && sval != nil && fmt.Sprintf("%v", sval) != "" {
+						return strings.TrimSpace(fmt.Sprintf("%v", sval))
+					}
+					if val, ok := m["value"]; ok && val != nil && fmt.Sprintf("%v", val) != "" {
+						return strings.TrimSpace(fmt.Sprintf("%v", val))
+					}
+				}
+			}
+		}
+	}
+	return ""
+}
+
+// GetFirstInputFieldValue returns the value of the first non-empty input field
+func (c *YunhuContent) GetFirstInputFieldValue() string {
+	if c.FormJson == nil {
+		return ""
+	}
+	for _, item := range c.FormJson {
+		if m, ok := item.(map[string]interface{}); ok {
+			fieldType, _ := m["type"].(string)
+			if fieldType == "input" || fieldType == "textarea" {
+				if val, ok := m["value"]; ok && val != nil && fmt.Sprintf("%v", val) != "" {
+					return strings.TrimSpace(fmt.Sprintf("%v", val))
+				}
+			}
+		}
+	}
+	return ""
+}
+
 func (c *YunhuContent) GetFormFieldString(fieldID string) string {
 	val, ok := c.GetFormFieldVal(fieldID)
 	if !ok || val == nil {

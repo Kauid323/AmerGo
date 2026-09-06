@@ -525,7 +525,16 @@ func handleInstructionMessage(event model.YunhuEvent) {
 		case "解绑":
 			targetGroup := msg.Content.GetFormFieldString("group_id")
 			if targetGroup == "" {
+				targetGroup = msg.Content.GetFormFieldString("QQ群号")
+			}
+			if targetGroup == "" {
 				targetGroup = msg.Content.GetFormFieldString("群号")
+			}
+			if targetGroup == "" {
+				targetGroup = msg.Content.GetFormFieldByFuzzyLabel("群号", "群", "qq")
+			}
+			if targetGroup == "" {
+				targetGroup = msg.Content.GetFirstInputFieldValue()
 			}
 			if targetGroup == "" {
 				targetGroup = strings.TrimSpace(strings.TrimPrefix(msg.Content.Text, "/解绑"))
@@ -551,7 +560,16 @@ func handleInstructionMessage(event model.YunhuEvent) {
 		case "绑定":
 			targetGroup := msg.Content.GetFormFieldString("group_id")
 			if targetGroup == "" {
+				targetGroup = msg.Content.GetFormFieldString("QQ群号")
+			}
+			if targetGroup == "" {
 				targetGroup = msg.Content.GetFormFieldString("群号")
+			}
+			if targetGroup == "" {
+				targetGroup = msg.Content.GetFormFieldByFuzzyLabel("群号", "群", "qq")
+			}
+			if targetGroup == "" {
+				targetGroup = msg.Content.GetFirstInputFieldValue()
 			}
 			if targetGroup == "" {
 				targetGroup = strings.TrimSpace(strings.TrimPrefix(msg.Content.Text, "/绑定"))
@@ -574,9 +592,21 @@ func handleInstructionMessage(event model.YunhuEvent) {
 			if syncType == "" {
 				syncType = msg.Content.GetFormFieldString("同步模式")
 			}
+			if syncType == "" {
+				syncType = msg.Content.GetFormFieldByFuzzyLabel("同步模式", "模式", "sync")
+			}
 			targetQQGroup := msg.Content.GetFormFieldString("group_id")
 			if targetQQGroup == "" {
+				targetQQGroup = msg.Content.GetFormFieldString("QQ群号")
+			}
+			if targetQQGroup == "" {
 				targetQQGroup = msg.Content.GetFormFieldString("群号")
+			}
+			if targetQQGroup == "" {
+				targetQQGroup = msg.Content.GetFormFieldByFuzzyLabel("群号", "群", "qq")
+			}
+			if targetQQGroup == "" {
+				targetQQGroup = msg.Content.GetFirstInputFieldValue()
 			}
 
 			if syncType == "" {
