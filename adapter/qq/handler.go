@@ -12,8 +12,27 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
+
+var (
+	recentQQMsgIDs sync.Map
+)
+
+func isDuplicateQQMsg(msgID string) bool {
+	if msgID == "" || msgID == "0" {
+		return false
+	}
+	now := time.Now()
+	if val, loaded := recentQQMsgIDs.LoadOrStore(msgID, now); loaded {
+		if t, ok := val.(time.Time); ok && now.Sub(t) < 5*time.Minute {
+			return true
+		}
+		recentQQMsgIDs.Store(msgID, now)
+	}
+	return false
+}
 
 func HandleOneBotEvent(event model.OneBotEvent) {
 	postType := strings.TrimSpace(event.PostType)
@@ -44,6 +63,12 @@ func handleQQMessage(event model.OneBotEvent) {
 	}
 	if strings.TrimSpace(event.PostType) == "message_sent" {
 		log.Printf("[QQ Filter] 过滤 message_sent 事件")
+		return
+	}
+
+	msgIDStr := event.MessageID.String()
+	if msgIDStr != "" && msgIDStr != "0" && isDuplicateQQMsg(msgIDStr) {
+		log.Printf("[QQ Filter] 过滤重复消息 ID: %s", msgIDStr)
 		return
 	}
 
@@ -158,7 +183,7 @@ func handleQQMessage(event model.OneBotEvent) {
 			} else {
 				message.SendToAllBindings("QQ", groupIDStr, "html", displayCleanedMsg, senderUserIDStr, cleanedName, contentHTML, event.MessageID.String())
 			}
-		} else if strings.Contains(rawMsg, "[CQ:forward") {
+		} else if strings.Contains(rawMsg, "[CQ:forward") || strings.Contains(rawMsg, "com.tencent.multimsg") || strings.Contains(rawMsg, "转发的聊天记录") {
 			forwardID := message.ExtractForwardID(rawMsg)
 			if forwardID != "" {
 				forwardHTML := FetchForwardMsgHTML(forwardID, groupName, cleanedName, senderUserIDStr, groupID)
@@ -350,14 +375,14 @@ func FetchForwardMsgHTML(forwardID, groupName, senderName, senderIDStr string, g
 					nodeContentHTML := parseNodeContent(nodeContent, groupID)
 
 					nodesSB.WriteString(fmt.Sprintf(
-						`<div style="background:#fff;padding:3px 6px;border-radius:3px;margin-bottom:3px;border:1px solid #edf2f7;font-size:12px;"><span style="color:#2563eb;font-weight:600;">%s (%s):</span> <span>%s</span></div>`,
+						`<div style="margin:2px 0;"><b style="color:#2563eb;">%s (%s):</b> <span>%s</span></div>`,
 						html.EscapeString(nodeSender), timeStr, nodeContentHTML,
 					))
 				}
 
 				forwardHTML := fmt.Sprintf(
-					`<div style="display:flex;align-items:center;gap:6px;margin-bottom:3px;"><img src="%s" style="width:24px;height:24px;border-radius:50%%;"><span style="font-size:13px;font-weight:600;color:#333;">%s</span><span style="font-size:11px;color:#888;">(%s)</span></div><div style="background:#f8f9fa;padding:6px;border-radius:5px;border:1px solid #e2e8f0;"><div style="font-weight:600;margin-bottom:4px;color:#333;font-size:12px;">📨 合并转发消息 (共 %d 条)</div>%s</div><div style="font-size:11px;color:#999;margin-top:2px;"><details><summary style="cursor:pointer;color:#2563eb;font-size:11px;">详情</summary><div style="padding:2px 0;line-height:1.3;">群: %s | ID: %s | %s</div></details></div>`,
-					avatarURL, senderName, senderIDStr, len(forwardData.Messages), nodesSB.String(), groupName, groupName, time.Now().Format("2006-01-02 15:04:05"),
+					`<div style="display:flex;align-items:center;gap:6px;margin-bottom:3px;"><img src="%s" style="width:24px;height:24px;border-radius:50%%;"><span style="font-size:13px;font-weight:600;color:#333;">%s</span><span style="font-size:11px;color:#888;">(%s)</span></div><details style="cursor:pointer;margin:4px 0;"><summary style="cursor:pointer;color:#2563eb;font-weight:600;font-size:13px;outline:none;user-select:none;">📨 聊天记录 (共 %d 条，点击展开)</summary><div style="margin-top:4px;padding:6px 8px;background:#f8f9fa;border-radius:4px;border:1px solid #e2e8f0;font-size:12px;line-height:1.5;">%s</div></details><div style="font-size:11px;color:#999;margin-top:2px;">群: %s | ID: %s | %s</div>`,
+					avatarURL, senderName, senderIDStr, len(forwardData.Messages), nodesSB.String(), groupName, senderIDStr, time.Now().Format("2006-01-02 15:04:05"),
 				)
 				return message.CompressHTML(forwardHTML)
 			}
@@ -372,8 +397,8 @@ func FetchForwardMsgHTML(forwardID, groupName, senderName, senderIDStr string, g
 func BuildForwardFallbackHTML(groupName, senderName, senderIDStr string) string {
 	avatarURL := fmt.Sprintf("http://q1.qlogo.cn/g?b=qq&nk=%s&s=100", senderIDStr)
 	fallbackHTML := fmt.Sprintf(
-		`<div style="display:flex;align-items:center;gap:6px;margin-bottom:3px;"><img src="%s" style="width:24px;height:24px;border-radius:50%%;"><span style="font-size:13px;font-weight:600;color:#333;">%s</span><span style="font-size:11px;color:#888;">(%s)</span></div><div style="background:#f8f9fa;padding:6px;border-radius:5px;border:1px solid #e2e8f0;font-size:12px;"><div style="font-weight:600;color:#333;">📦 [QQ 合并转发消息]</div><div style="color:#666;">转发聊天记录</div></div><div style="font-size:11px;color:#999;margin-top:2px;"><details><summary style="cursor:pointer;color:#2563eb;font-size:11px;">详情</summary><div style="padding:2px 0;line-height:1.3;">群: %s | ID: %s | %s</div></details></div>`,
-		avatarURL, senderName, senderIDStr, groupName, groupName, time.Now().Format("2006-01-02 15:04:05"),
+		`<div style="display:flex;align-items:center;gap:6px;margin-bottom:3px;"><img src="%s" style="width:24px;height:24px;border-radius:50%%;"><span style="font-size:13px;font-weight:600;color:#333;">%s</span><span style="font-size:11px;color:#888;">(%s)</span></div><details style="cursor:pointer;margin:4px 0;"><summary style="cursor:pointer;color:#2563eb;font-weight:600;font-size:13px;outline:none;user-select:none;">📨 QQ合并转发消息 (点击展开)</summary><div style="margin-top:4px;padding:6px 8px;background:#f8f9fa;border-radius:4px;border:1px solid #e2e8f0;font-size:12px;color:#666;">转发聊天记录</div></details><div style="font-size:11px;color:#999;margin-top:2px;">群: %s | ID: %s | %s</div>`,
+		avatarURL, senderName, senderIDStr, groupName, senderIDStr, time.Now().Format("2006-01-02 15:04:05"),
 	)
 	return message.CompressHTML(fallbackHTML)
 }

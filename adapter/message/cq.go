@@ -342,7 +342,12 @@ func RenderCardHTML(tag, title, desc, preview, url string) string {
 
 	// 描述内容
 	if desc != "" {
-		sb.WriteString(fmt.Sprintf(`<div style="color:#444;font-size:12px;margin-bottom:3px;word-break:break-word;">%s</div>`, desc))
+		isForwardCard := tag == "转发的聊天记录" || tag == "聊天记录" || tag == "合并转发" || strings.Contains(title, "聊天记录")
+		if isForwardCard {
+			sb.WriteString(fmt.Sprintf(`<details style="cursor:pointer;margin:3px 0;"><summary style="cursor:pointer;color:#2563eb;font-weight:600;font-size:12px;outline:none;user-select:none;">📨 点击展开聊天记录</summary><div style="margin-top:4px;color:#444;font-size:12px;word-break:break-word;">%s</div></details>`, desc))
+		} else {
+			sb.WriteString(fmt.Sprintf(`<div style="color:#444;font-size:12px;margin-bottom:3px;word-break:break-word;">%s</div>`, desc))
+		}
 	}
 
 	// 缩略图
@@ -1134,12 +1139,17 @@ func BuildAudioA2UI(surfaceID, groupName, groupIDStr, senderName, senderIDStr, a
 	return string(bytes)
 }
 
-// ExtractForwardID extracts the forward message ID from a CQ:forward code string.
+// ExtractForwardID extracts the forward message ID from a CQ:forward code string or JSON card.
 func ExtractForwardID(msg string) string {
 	re := regexp.MustCompile(`\[CQ:forward,id=([^,\]]+)\]`)
 	matches := re.FindStringSubmatch(msg)
 	if len(matches) >= 2 {
 		return matches[1]
+	}
+	reResid := regexp.MustCompile(`"(?:res_id|resid)"\s*:\s*"([^"]+)"`)
+	mRes := reResid.FindStringSubmatch(msg)
+	if len(mRes) >= 2 {
+		return mRes[1]
 	}
 	return ""
 }

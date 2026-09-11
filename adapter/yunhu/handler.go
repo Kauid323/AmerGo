@@ -13,9 +13,45 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
+
+var (
+	// reportCooldownMap records user report cooldowns and attempt counts
+	// key: reporterID + "_" + msgID (or just reporterID)
+	reportCooldownMap sync.Map
+	// adminActionClickMap records admin action clicks for reportID
+	adminActionClickMap sync.Map
+	// recentYunhuEventIDs tracks recently received event IDs to prevent duplicate execution
+	recentYunhuEventIDs sync.Map
+)
+
+func isDuplicateYunhuEvent(eventID string) bool {
+	if eventID == "" {
+		return false
+	}
+	now := time.Now()
+	if val, loaded := recentYunhuEventIDs.LoadOrStore(eventID, now); loaded {
+		if t, ok := val.(time.Time); ok && now.Sub(t) < 5*time.Minute {
+			return true
+		}
+		recentYunhuEventIDs.Store(eventID, now)
+	}
+	return false
+}
+
+type reportCooldownItem struct {
+	FirstReportTime time.Time
+	AttemptCount    int
+}
+
+type adminClickItem struct {
+	ClickCount int
+	LastClick  time.Time
+}
 
 func parseGroupIDs(input string) []string {
 	if strings.TrimSpace(input) == "" {
@@ -40,6 +76,9 @@ type ReportData struct {
 	Platform     string `json:"platform"`
 	GroupID      string `json:"group_id"`
 	MsgID        string `json:"msg_id"`
+	YunhuMsgID   string `json:"yunhu_msg_id"`
+	ChatID       string `json:"chat_id"`
+	ChatType     string `json:"chat_type"`
 	SenderID     string `json:"sender_id"`
 	SenderName   string `json:"sender_name"`
 	ReporterID   string `json:"reporter_id"`
@@ -59,16 +98,139 @@ func NotifyAdminReport(report *db.ReportRecord) {
 		reporterInfo = fmt.Sprintf("%s (ID: %s)", report.ReporterName, report.ReporterID)
 	}
 
+	// 1. 确定真实的云湖群聊与云湖消息 ID
+	yhChatID := report.ChatID
+	yhChatType := report.ChatType
+	if yhChatType == "" {
+		yhChatType = "group"
+	}
+	if (yhChatID == "" || yhChatID == report.GroupID) && report.GroupID != "" {
+		if bindInfo := db.GetInfo("QQ", report.GroupID); bindInfo.Status == 0 {
+			if yhGroupIDs, ok := bindInfo.Data["YH_group_ids"].([]db.BindingItem); ok && len(yhGroupIDs) > 0 {
+				yhChatID = yhGroupIDs[0].ID
+			}
+		}
+	}
+
+	var candidateYHMsgIDs []string
+	if report.YunhuMsgID != "" {
+		candidateYHMsgIDs = append(candidateYHMsgIDs, report.YunhuMsgID)
+	}
+
+	var qqMsgID int64
+	if id, err := strconv.ParseInt(report.MsgID, 10, 64); err == nil && id != 0 {
+		qqMsgID = id
+	}
+	if qqMsgID != 0 {
+		if realID, ok := db.GetYunhuMsgIDByQQMsgID(qqMsgID); ok && realID != "" {
+			candidateYHMsgIDs = append(candidateYHMsgIDs, realID)
+		}
+	}
+	if cachedYHID, _, _, _, found := db.GetYunhuMsgCache(report.MsgID); found && cachedYHID != "" {
+		candidateYHMsgIDs = append(candidateYHMsgIDs, cachedYHID)
+	}
+	if len(report.MsgID) >= 20 {
+		candidateYHMsgIDs = append(candidateYHMsgIDs, report.MsgID)
+	}
+
+	var originalYHItem *YunhuMessageItem
+	if YHClient != nil && yhChatID != "" {
+		for _, targetYHMsgID := range candidateYHMsgIDs {
+			if targetYHMsgID == "" || strings.HasPrefix(targetYHMsgID, "-") {
+				continue
+			}
+			yhItem, err := YHClient.GetMessage(yhChatID, yhChatType, targetYHMsgID)
+			if err == nil && yhItem != nil {
+				originalYHItem = yhItem
+				log.Printf("[Report Admin] 成功通过云湖官方 API 获取被举报原消息 (MsgID: %s, 群: %s)", targetYHMsgID, yhChatID)
+				break
+			} else {
+				log.Printf("[Report Admin Debug] 通过云湖官方 API 获取消息 (MsgID: %s, 群: %s) 失败: %v", targetYHMsgID, yhChatID, err)
+			}
+		}
+	}
+
+	// 2. 原汁原味直接调用发送消息 API 重新将原消息推送给管理员（不做任何二次 HTML 或 Markdown 代码块包装）
+	sentOriginal := false
+	if originalYHItem != nil {
+		if _, err := YHClient.SendMessageItem(adminID, "user", originalYHItem); err == nil {
+			sentOriginal = true
+			log.Printf("[Report Admin] 成功将被举报云湖原消息通过发送 API 原生转发给管理员 %s", adminID)
+		} else {
+			log.Printf("[Report Admin Error] 转发被举报云湖原消息失败: %v", err)
+		}
+	}
+
+	// 兜底：如果云湖接口没取到，但有 QQ 端原消息，也直接以原 HTML 发送
+	if !sentOriginal {
+		var rawQQMsg string
+		var qGroupID int64
+		if report.GroupID != "" {
+			_, _ = fmt.Sscanf(report.GroupID, "%d", &qGroupID)
+		}
+		if qqMsgID != 0 && message.GlobalQQSender != nil {
+			if msgInfo, err := message.GlobalQQSender.GetReplyMsg(qqMsgID, qGroupID); err == nil && msgInfo != nil {
+				if msgInfo.RawText != "" {
+					rawQQMsg = msgInfo.RawText
+				} else if msgInfo.Summary != "" {
+					rawQQMsg = msgInfo.Summary
+				}
+			}
+		}
+		if rawQQMsg == "" && qqMsgID != 0 {
+			if mapping, ok := db.GetQQMsgInfo(qqMsgID); ok && mapping != nil && mapping.RawText != "" {
+				rawQQMsg = mapping.RawText
+			}
+		}
+		if rawQQMsg != "" {
+			if strings.Contains(rawQQMsg, "[CQ:video") {
+				videoURL := message.ExtractVideoURL(rawQQMsg)
+				if videoURL != "" {
+					surfaceID := fmt.Sprintf("video_%s_%d", report.MsgID, time.Now().UnixNano())
+					a2uiJSON := message.BuildVideoA2UI(surfaceID, fmt.Sprintf("QQ群-%s", report.GroupID), report.GroupID, report.SenderName, report.SenderID, videoURL, report.MsgID)
+					if _, err := YHClient.Send(adminID, "user", "a2ui", a2uiJSON); err == nil {
+						sentOriginal = true
+						log.Printf("[Report Admin] 成功将被举报 QQ 视频消息转为 A2UI 原生推送给管理员 %s", adminID)
+					}
+				}
+			} else if strings.Contains(rawQQMsg, "[CQ:record") {
+				audioURL, fileVal := message.ExtractAudioURL(rawQQMsg)
+				if audioURL != "" || fileVal != "" {
+					audioPlayURI := message.FetchAudioDataURI(audioURL, fileVal)
+					surfaceID := fmt.Sprintf("audio_%s_%d", report.MsgID, time.Now().UnixNano())
+					a2uiJSON := message.BuildAudioA2UI(surfaceID, fmt.Sprintf("QQ群-%s", report.GroupID), report.GroupID, report.SenderName, report.SenderID, audioPlayURI, report.MsgID)
+					if _, err := YHClient.Send(adminID, "user", "a2ui", a2uiJSON); err == nil {
+						sentOriginal = true
+						log.Printf("[Report Admin] 成功将被举报 QQ 语音消息转为 A2UI 原生推送给管理员 %s", adminID)
+					}
+				}
+			}
+			if !sentOriginal {
+				rawHTML := message.CQToHTMLWithGroup(rawQQMsg, qGroupID)
+				if _, err := YHClient.Send(adminID, "user", "html", rawHTML); err == nil {
+					sentOriginal = true
+					log.Printf("[Report Admin] 成功将被举报 QQ 原消息转为富文本原生推送给管理员 %s", adminID)
+				}
+			}
+		}
+	}
+
+	originTip := "ℹ️ **提示**: 被举报原消息内容已在上方重新发送供您审阅。"
+	if !sentOriginal {
+		originTip = "ℹ️ **提示**: 暂未能通过接口拉取到原多媒体消息原文，请核对消息ID。"
+	}
+
 	text := fmt.Sprintf("🚨 **收到新的违规消息举报通知**\n\n"+
 		"- **举报 ID**: `%s`\n"+
 		"- **消息 ID**: `%s`\n"+
-		"- **来源群聊**: `QQ群-%s` (%s)\n"+
+		"- **来源群聊**: `QQ群-%s`\n"+
 		"- **被举报用户 ID**: `%s`\n"+
 		"- **举报原因**: %s\n"+
 		"- **举报人**: `%s`\n"+
 		"- **提交时间**: %s\n\n"+
+		"%s\n\n"+
 		"请审核并选择处理操作：",
-		report.ReportID, report.MsgID, report.GroupID, report.GroupID, report.SenderID, report.Reason, reporterInfo, report.CreatedAt)
+		report.ReportID, report.MsgID, report.GroupID, report.SenderID, report.Reason, reporterInfo, report.CreatedAt, originTip)
 
 	buttons := []interface{}{
 		[]map[string]interface{}{
@@ -114,13 +276,40 @@ func ProcessReportData(req ReportData) (bool, string) {
 		req.SenderName = "匿名用户"
 	}
 
-	// Retrieve cached real Yunhu MsgID, chat_id, and chat_type for req.MsgID if available
-	realYHMsgID, chatID, chatType, cachedSenderID, found := db.GetYunhuMsgCache(req.MsgID)
-	if !found || realYHMsgID == "" {
+	// 优先使用请求传入的云湖群与消息 ID，如未传则尝试反查
+	chatID := req.ChatID
+	chatType := req.ChatType
+	if chatType == "" {
+		chatType = "group"
+	}
+	realYHMsgID := req.YunhuMsgID
+	if realYHMsgID == "" {
+		if rID, cID, cType, cachedSenderID, found := db.GetYunhuMsgCache(req.MsgID); found {
+			if rID != "" && !strings.HasPrefix(rID, "-") {
+				realYHMsgID = rID
+			}
+			if chatID == "" {
+				chatID = cID
+				chatType = cType
+			}
+			if cachedSenderID != "" && (req.SenderID == "0" || req.SenderID == "") {
+				req.SenderID = cachedSenderID
+			}
+		}
+	}
+	if realYHMsgID == "" {
+		if qqID, err := strconv.ParseInt(req.MsgID, 10, 64); err == nil && qqID != 0 {
+			if rID, ok := db.GetYunhuMsgIDByQQMsgID(qqID); ok && rID != "" {
+				realYHMsgID = rID
+			}
+		}
+	}
+	if realYHMsgID == "" && len(req.MsgID) >= 20 {
 		realYHMsgID = req.MsgID
 	}
-	if !found || chatID == "" {
-		// If not found in cache, check if req.GroupID is a QQ group ID bound to a YH group ID
+
+	if chatID == "" {
+		// Check if req.GroupID is a QQ group ID bound to a YH group ID
 		bindInfo := db.GetInfo("QQ", req.GroupID)
 		if bindInfo.Status == 0 {
 			if yhGroupIDs, ok := bindInfo.Data["YH_group_ids"].([]db.BindingItem); ok && len(yhGroupIDs) > 0 {
@@ -133,16 +322,20 @@ func ProcessReportData(req ReportData) (bool, string) {
 			chatType = "group"
 		}
 	}
-	if cachedSenderID != "" && (req.SenderID == "0" || req.SenderID == "") {
-		req.SenderID = cachedSenderID
-	}
 
 	reportID := fmt.Sprintf("rep_%d", time.Now().UnixNano())
 	createdAt := time.Now().Format("2006-01-02 15:04:05")
 
+	// 优先保留被举报的目标消息原始 ID (例如 QQ 消息 ID)，如果是云湖消息则为云湖消息 ID
+	targetMsgID := req.MsgID
+	if targetMsgID == "" {
+		targetMsgID = realYHMsgID
+	}
+
 	reportRecord := &db.ReportRecord{
 		ReportID:     reportID,
-		MsgID:        realYHMsgID,
+		MsgID:        targetMsgID,
+		YunhuMsgID:   realYHMsgID,
 		ChatID:       chatID,
 		ChatType:     chatType,
 		GroupID:      req.GroupID,
@@ -187,8 +380,14 @@ func ProcessReportData(req ReportData) (bool, string) {
 }
 
 func HandleYunhuEvent(event model.YunhuEvent) {
+	eventID := strings.TrimSpace(event.Header.EventID.String())
+	if eventID != "" && isDuplicateYunhuEvent(eventID) {
+		log.Printf("[Yunhu Event] 忽略重复事件 ID: %s", eventID)
+		return
+	}
+
 	eventType := event.Header.EventType.String()
-	log.Printf("[Yunhu Event] 收到事件: %s, 事件ID: %s", eventType, event.Header.EventID)
+	log.Printf("[Yunhu Event] 收到事件: %s, 事件ID: %s", eventType, eventID)
 
 	switch {
 	case eventType == "message.receive.normal":
@@ -229,7 +428,7 @@ func handleNormalMessage(event model.YunhuEvent) {
 	chatType := event.Event.GetChatType()
 	senderID := sender.SenderID.String()
 
-	if senderID == config.AppConfig.QQ.BotQQ {
+	if senderID == config.AppConfig.QQ.BotQQ || sender.SenderType == "bot" {
 		return
 	}
 
@@ -735,17 +934,54 @@ func handleA2UIButtonEvent(event model.YunhuEvent) {
 		cbChatID := event.Event.GetChatID()
 		cbChatType := event.Event.GetChatType()
 
-		if cbMsgID != "" {
-			if msgID != "" {
-				db.SaveYunhuMsgCache(msgID, cbChatID, cbChatType, senderID, cbMsgID)
-			}
-			msgID = cbMsgID
+		targetMsgID := msgID
+		if targetMsgID == "" {
+			targetMsgID = cbMsgID
 		}
+
+		realYHMsgID := cbMsgID
+		if targetMsgID != "" && cbMsgID != "" {
+			db.SaveYunhuMsgCache(targetMsgID, cbChatID, cbChatType, senderID, cbMsgID)
+			if qqMsgIDNum, err := strconv.ParseInt(targetMsgID, 10, 64); err == nil && qqMsgIDNum != 0 {
+				db.BindYunhuMsgToQQMsg(cbMsgID, qqMsgIDNum)
+			}
+		}
+
+		// --- 举报冷却控制 (1分钟只能举报1次) ---
+		// 规则：第二次收到点击举报消息发送"有冷却时间"提示，如果再收到多次点击则不发送任何消息提示
+		cooldownKey := fmt.Sprintf("cooldown:%s", userID)
+		now := time.Now()
+		val, exists := reportCooldownMap.Load(cooldownKey)
+		if exists {
+			item := val.(reportCooldownItem)
+			if now.Sub(item.FirstReportTime) < time.Minute {
+				item.AttemptCount++
+				reportCooldownMap.Store(cooldownKey, item)
+				if item.AttemptCount == 2 {
+					// 第二次点击：提醒冷却时间
+					if cbChatID != "" {
+						_, _ = YHClient.Send(cbChatID, cbChatType, "text", "⚠️ 举报过于频繁，有冷却时间（1分钟内只能提交1次），请稍后再试！")
+					}
+				}
+				// 第3次及以上多次点击：静默丢弃，不发送消息
+				log.Printf("[Yunhu Report RateLimit] 用户 %s 处在举报冷却中 (第 %d 次尝试)，直接忽略", userID, item.AttemptCount)
+				return
+			}
+		}
+
+		// 记录新的举报时间点
+		reportCooldownMap.Store(cooldownKey, reportCooldownItem{
+			FirstReportTime: now,
+			AttemptCount:    1,
+		})
 
 		req := ReportData{
 			Platform:     "QQ",
 			GroupID:      groupID,
-			MsgID:        msgID,
+			MsgID:        targetMsgID,
+			YunhuMsgID:   realYHMsgID,
+			ChatID:       cbChatID,
+			ChatType:     cbChatType,
 			SenderID:     senderID,
 			ReporterID:   userID,
 			ReporterName: userName,
@@ -776,16 +1012,35 @@ func handleA2UIButtonEvent(event model.YunhuEvent) {
 			}
 
 			if reportRec.Status != "PENDING" {
-				statusText := "已处理"
-				switch reportRec.Status {
-				case "APPROVED":
-					statusText = "已同意 (已被封禁该用户)"
-				case "REJECTED":
-					statusText = "已拒绝 (已忽略该举报)"
-				case "RECALLED":
-					statusText = "已撤回违规消息"
+				// --- 管理员重复点击防护 ---
+				// 处理完的消息：第二次收到点击提示“已处理”，如果以后再收到对应的多次点击则不发送消息提示
+				clickKey := fmt.Sprintf("admin_click:%s:%s", reportID, actionType)
+				val, exists := adminActionClickMap.Load(clickKey)
+				count := 1
+				if exists {
+					item := val.(adminClickItem)
+					count = item.ClickCount + 1
 				}
-				_, _ = YHClient.Send(userID, "user", "text", fmt.Sprintf("⚠️ 该举报 (ID: %s) 此前已被处理为【%s】，请勿重复操作！", reportID, statusText))
+				adminActionClickMap.Store(clickKey, adminClickItem{
+					ClickCount: count,
+					LastClick:  time.Now(),
+				})
+
+				if count == 1 {
+					statusText := "已处理"
+					switch reportRec.Status {
+					case "APPROVED":
+						statusText = "已同意 (已被封禁该用户)"
+					case "REJECTED":
+						statusText = "已拒绝 (已忽略该举报)"
+					case "RECALLED":
+						statusText = "已撤回违规消息"
+					}
+					_, _ = YHClient.Send(userID, "user", "text", fmt.Sprintf("⚠️ 该举报 (ID: %s) 此前已被处理为【%s】，请勿重复操作！", reportID, statusText))
+				} else {
+					// 多次重复点击：静默忽略，不再发送消息
+					log.Printf("[Report Admin RateLimit] 管理员 %s 重复点击已处理的举报 %s (第 %d 次)，静默忽略", userID, reportID, count)
+				}
 				return
 			}
 
@@ -796,9 +1051,37 @@ func handleA2UIButtonEvent(event model.YunhuEvent) {
 				_ = db.AddToBlacklist(reportRec.SenderID, fmt.Sprintf("管理员违规处理封禁 (%s)", reportRec.Reason), 3600)
 				log.Printf("[Report Admin] 管理员 %s (%s) 批准了举报 %s，用户 %s 已拉黑 1 小时", userName, userID, reportID, reportRec.SenderID)
 
+				targetChatID := reportRec.ChatID
+				targetChatType := reportRec.ChatType
+				if targetChatType == "" {
+					targetChatType = "group"
+				}
+				if bindInfo := db.GetInfo("QQ", targetChatID); bindInfo.Status == 0 {
+					if yhGroupIDs, ok := bindInfo.Data["YH_group_ids"].([]db.BindingItem); ok && len(yhGroupIDs) > 0 {
+						targetChatID = yhGroupIDs[0].ID
+					}
+				}
+
+				recallYHMsgID := reportRec.YunhuMsgID
+				if recallYHMsgID == "" {
+					if realID, _, _, _, found := db.GetYunhuMsgCache(reportRec.MsgID); found && realID != "" {
+						recallYHMsgID = realID
+					}
+				}
+				if recallYHMsgID == "" {
+					if qqID, err := strconv.ParseInt(reportRec.MsgID, 10, 64); err == nil && qqID != 0 {
+						if realID, ok := db.GetYunhuMsgIDByQQMsgID(qqID); ok && realID != "" {
+							recallYHMsgID = realID
+						}
+					}
+				}
+				if recallYHMsgID == "" && len(reportRec.MsgID) >= 20 {
+					recallYHMsgID = reportRec.MsgID
+				}
+
 				// Automatically attempt recall as well when approving
-				if reportRec.MsgID != "" && reportRec.ChatID != "" {
-					_ = YHClient.Recall(reportRec.MsgID, reportRec.ChatID, reportRec.ChatType)
+				if recallYHMsgID != "" && targetChatID != "" {
+					_ = YHClient.Recall(recallYHMsgID, targetChatID, targetChatType)
 				}
 
 				_, _ = YHClient.Send(userID, "user", "text", fmt.Sprintf("✅ 操作成功：已同意举报 [%s]！被举报用户 (%s) 已加入黑名单封禁 1 小时，相关违规消息已尝试撤回。", reportID, reportRec.SenderID))
@@ -825,11 +1108,28 @@ func handleA2UIButtonEvent(event model.YunhuEvent) {
 					}
 				}
 
-				if reportRec.MsgID != "" && targetChatID != "" {
-					err := YHClient.Recall(reportRec.MsgID, targetChatID, targetChatType)
+				recallYHMsgID := reportRec.YunhuMsgID
+				if recallYHMsgID == "" {
+					if realID, _, _, _, found := db.GetYunhuMsgCache(reportRec.MsgID); found && realID != "" {
+						recallYHMsgID = realID
+					}
+				}
+				if recallYHMsgID == "" {
+					if qqID, err := strconv.ParseInt(reportRec.MsgID, 10, 64); err == nil && qqID != 0 {
+						if realID, ok := db.GetYunhuMsgIDByQQMsgID(qqID); ok && realID != "" {
+							recallYHMsgID = realID
+						}
+					}
+				}
+				if recallYHMsgID == "" && len(reportRec.MsgID) >= 20 {
+					recallYHMsgID = reportRec.MsgID
+				}
+
+				if recallYHMsgID != "" && targetChatID != "" {
+					err := YHClient.Recall(recallYHMsgID, targetChatID, targetChatType)
 					if err == nil {
-						log.Printf("[Report Admin] 管理员 %s (%s) 成功撤回举报 %s 的消息 %s (Yunhu Group: %s)", userName, userID, reportID, reportRec.MsgID, targetChatID)
-						_, _ = YHClient.Send(userID, "user", "text", fmt.Sprintf("🗑️ 操作成功：已为举报 [%s] 成功撤回原消息 (MsgID: %s, 群ID: %s)！", reportID, reportRec.MsgID, targetChatID))
+						log.Printf("[Report Admin] 管理员 %s (%s) 成功撤回举报 %s 的消息 %s (Yunhu Group: %s)", userName, userID, reportID, recallYHMsgID, targetChatID)
+						_, _ = YHClient.Send(userID, "user", "text", fmt.Sprintf("🗑️ 操作成功：已为举报 [%s] 成功撤回原消息 (MsgID: %s, 群ID: %s)！", reportID, recallYHMsgID, targetChatID))
 					} else {
 						log.Printf("[Report Admin Fail] 撤回消息失败: %v", err)
 						_, _ = YHClient.Send(userID, "user", "text", fmt.Sprintf("❌ 撤回消息失败: %v", err))

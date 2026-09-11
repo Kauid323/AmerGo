@@ -104,6 +104,60 @@ func (c *Client) Send(recvID, recvType, contentType, content string) (string, er
 	return "", nil
 }
 
+// SendMessageItem resends a YunhuMessageItem using its original contentType and content
+func (c *Client) SendMessageItem(recvID, recvType string, item *YunhuMessageItem) (string, error) {
+	if item == nil {
+		return "", fmt.Errorf("消息项为空")
+	}
+	token := config.AppConfig.YH.Token
+	if token == "" {
+		return "", fmt.Errorf("云湖机器人 token 未配置")
+	}
+
+	apiURL := fmt.Sprintf("%s/open-apis/v1/bot/send?token=%s", BotSendBaseURL, token)
+
+	payload := map[string]interface{}{
+		"recvId":      recvID,
+		"recvType":    recvType,
+		"contentType": item.ContentType,
+		"content":     item.Content,
+	}
+
+	bodyBytes, err := json.Marshal(payload)
+	if err != nil {
+		return "", err
+	}
+
+	req, err := http.NewRequest("POST", apiURL, bytes.NewBuffer(bodyBytes))
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.httpClient.Do(req)
+	if err != nil {
+		log.Printf("[Yunhu] 转发被举报消息请求失败: %v", err)
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	respBody, _ := io.ReadAll(resp.Body)
+	log.Printf("[Yunhu] 转发被举报消息响应 (%s:%s): %s", recvType, recvID, string(respBody))
+
+	var apiResp commonResp
+	if err := json.Unmarshal(respBody, &apiResp); err == nil {
+		if !isSuccess(apiResp.Code, apiResp.Msg) {
+			return "", fmt.Errorf("%s", apiResp.Msg)
+		}
+		msgID := apiResp.Data.MessageInfo.MsgID
+		if msgID == "" {
+			msgID = apiResp.Data.MsgID
+		}
+		return msgID, nil
+	}
+	return "", nil
+}
+
 func (c *Client) SendWithButtons(recvID, recvType, contentType, text string, buttons []interface{}) error {
 	token := config.AppConfig.YH.Token
 	if token == "" {
@@ -430,5 +484,108 @@ func (c *Client) UploadImage(imgData []byte, filename string) (string, error) {
 	yunhuImgURL := fmt.Sprintf("https://chat-img.jwznb.com/%s%s", imageHash, ext)
 	log.Printf("[Yunhu Upload Success] 图片成功上传至云湖，访问地址: %s", yunhuImgURL)
 	return yunhuImgURL, nil
+}
+
+type YunhuMessageItem struct {
+	MsgID          string      `json:"msgId"`
+	ParentID       string      `json:"parentId"`
+	SenderID       string      `json:"senderId"`
+	SenderType     string      `json:"senderType"`
+	SenderNickname string      `json:"senderNickname"`
+	ContentType    string      `json:"contentType"`
+	Content        interface{} `json:"content"`
+	SendTime       int64       `json:"sendTime"`
+	CommandName    string      `json:"commandName"`
+	CommandID      int64       `json:"commandId"`
+}
+
+type YunhuMessagesResp struct {
+	Code int    `json:"code"`
+	Msg  string `json:"msg"`
+	Data struct {
+		List  []YunhuMessageItem `json:"list"`
+		Total int                `json:"total"`
+	} `json:"data"`
+}
+
+// GetMessage fetches a specific message from Yunhu chat by msgId, chatId and chatType according to official document 400-450
+func (c *Client) GetMessage(chatID, chatType, msgID string) (*YunhuMessageItem, error) {
+	token := config.AppConfig.YH.Token
+	if token == "" {
+		return nil, fmt.Errorf("云湖机器人 token 未配置")
+	}
+	if chatID == "" || chatType == "" || msgID == "" {
+		return nil, fmt.Errorf("参数不能为空: chatID=%s, chatType=%s, msgID=%s", chatID, chatType, msgID)
+	}
+
+	apiURL := fmt.Sprintf("https://chat-go.jwzhd.com/open-apis/v1/bot/messages?token=%s&chat-id=%s&chat-type=%s&message-id=%s&before=1&after=0",
+		token, chatID, chatType, msgID)
+
+	req, err := http.NewRequest("GET", apiURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	httpClient := c.httpClient
+	if httpClient == nil {
+		httpClient = &http.Client{Timeout: 5 * time.Second}
+	}
+
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	bodyBytes, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+
+	var res YunhuMessagesResp
+	if err := json.Unmarshal(bodyBytes, &res); err != nil {
+		return nil, fmt.Errorf("解析云湖消息列表响应失败: %v, raw: %s", err, string(bodyBytes))
+	}
+
+	if !isSuccess(res.Code, res.Msg) {
+		return nil, fmt.Errorf("云湖获取消息失败: %s (code: %d)", res.Msg, res.Code)
+	}
+
+	if len(res.Data.List) == 0 {
+		return nil, fmt.Errorf("未找到对应的云湖消息: %s", msgID)
+	}
+
+	for _, item := range res.Data.List {
+		if item.MsgID == msgID {
+			return &item, nil
+		}
+	}
+
+	return &res.Data.List[0], nil
+}
+
+// FormatYunhuMessageContent parses text or html content from a YunhuMessageItem
+func FormatYunhuMessageContent(item *YunhuMessageItem) string {
+	if item == nil {
+		return ""
+	}
+	if m, ok := item.Content.(map[string]interface{}); ok {
+		if text, ok := m["text"].(string); ok && strings.TrimSpace(text) != "" {
+			return strings.TrimSpace(text)
+		}
+		if html, ok := m["html"].(string); ok && strings.TrimSpace(html) != "" {
+			return strings.TrimSpace(html)
+		}
+		if img, ok := m["imageUrl"].(string); ok && img != "" {
+			return fmt.Sprintf("[图片: %s]", img)
+		}
+		if video, ok := m["videoUrl"].(string); ok && video != "" {
+			return fmt.Sprintf("[视频: %s]", video)
+		}
+	} else if s, ok := item.Content.(string); ok {
+		return strings.TrimSpace(s)
+	}
+	return fmt.Sprintf("[%s 消息]", item.ContentType)
 }
 

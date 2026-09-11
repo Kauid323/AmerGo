@@ -49,6 +49,7 @@ type BlacklistStatus struct {
 type ReportRecord struct {
 	ReportID     string `json:"report_id"`
 	MsgID        string `json:"msg_id"`
+	YunhuMsgID   string `json:"yunhu_msg_id"`
 	ChatID       string `json:"chat_id"`
 	ChatType     string `json:"chat_type"`
 	GroupID      string `json:"group_id"`
@@ -158,12 +159,22 @@ type QQMsgMapping struct {
 	SenderID   string `json:"sender_id"`
 	SenderName string `json:"sender_name"`
 	RawText    string `json:"raw_text"`
+	YHMsgID    string `json:"yh_msg_id,omitempty"`
 }
+
+var memoryQqToYhStore sync.Map // map[string]string (qqMsgID -> yhMsgID)
 
 // SaveQQMsgMapping stores the mapping from QQ Message ID and Yunhu Message ID
 func SaveQQMsgMapping(qqMsgID, qqGroupID int64, senderID, senderName, rawText, yhMsgID string) {
 	if qqMsgID == 0 {
 		return
+	}
+	qqKey := fmt.Sprintf("%d", qqMsgID)
+	// If yhMsgID not provided, check if we already have it cached
+	if yhMsgID == "" {
+		if v, ok := memoryQqToYhStore.Load(qqKey); ok {
+			yhMsgID = v.(string)
+		}
 	}
 	mapping := QQMsgMapping{
 		QQMsgID:    qqMsgID,
@@ -171,9 +182,9 @@ func SaveQQMsgMapping(qqMsgID, qqGroupID int64, senderID, senderName, rawText, y
 		SenderID:   senderID,
 		SenderName: senderName,
 		RawText:    rawText,
+		YHMsgID:    yhMsgID,
 	}
 	bytes, _ := json.Marshal(mapping)
-	qqKey := fmt.Sprintf("%d", qqMsgID)
 	memoryQQMsgStore.Store(qqKey, string(bytes))
 
 	if RDB != nil {
@@ -182,8 +193,10 @@ func SaveQQMsgMapping(qqMsgID, qqGroupID int64, senderID, senderName, rawText, y
 
 	if yhMsgID != "" {
 		memoryYhToQQStore.Store(yhMsgID, qqKey)
+		memoryQqToYhStore.Store(qqKey, yhMsgID)
 		if RDB != nil {
 			_ = RDB.Set(Ctx, fmt.Sprintf("yh_to_qq:%s", yhMsgID), qqKey, 7*24*time.Hour).Err()
+			_ = RDB.Set(Ctx, fmt.Sprintf("qq_to_yh:%s", qqKey), yhMsgID, 7*24*time.Hour).Err()
 		}
 	}
 }
@@ -195,9 +208,31 @@ func BindYunhuMsgToQQMsg(yhMsgID string, qqMsgID int64) {
 	}
 	qqKey := fmt.Sprintf("%d", qqMsgID)
 	memoryYhToQQStore.Store(yhMsgID, qqKey)
+	memoryQqToYhStore.Store(qqKey, yhMsgID)
 	if RDB != nil {
 		_ = RDB.Set(Ctx, fmt.Sprintf("yh_to_qq:%s", yhMsgID), qqKey, 7*24*time.Hour).Err()
+		_ = RDB.Set(Ctx, fmt.Sprintf("qq_to_yh:%s", qqKey), yhMsgID, 7*24*time.Hour).Err()
 	}
+}
+
+// GetYunhuMsgIDByQQMsgID resolves a QQ message ID to the corresponding Yunhu message ID
+func GetYunhuMsgIDByQQMsgID(qqMsgID int64) (string, bool) {
+	if qqMsgID == 0 {
+		return "", false
+	}
+	qqKey := fmt.Sprintf("%d", qqMsgID)
+	if v, ok := memoryQqToYhStore.Load(qqKey); ok {
+		return v.(string), true
+	}
+	if RDB != nil {
+		if v, err := RDB.Get(Ctx, fmt.Sprintf("qq_to_yh:%s", qqKey)).Result(); err == nil && v != "" {
+			return v, true
+		}
+	}
+	if mapping, ok := GetQQMsgInfo(qqMsgID); ok && mapping != nil && mapping.YHMsgID != "" {
+		return mapping.YHMsgID, true
+	}
+	return "", false
 }
 
 // GetQQMsgIDByYunhuMsgID resolves a Yunhu message ID to the corresponding QQ message ID (if forwarded from QQ)

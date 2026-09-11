@@ -274,6 +274,10 @@ func SendA2UIToAllBindings(platform, id, content, senderID, senderNickname, a2ui
 					} else {
 						if yhMsgID != "" {
 							db.SaveYunhuMsgCache(msgID, g.ID, "group", senderID, yhMsgID)
+							if qqMsgIDNum, err := strconv.ParseInt(msgID, 10, 64); err == nil && qqMsgIDNum != 0 {
+								qqGroupIDNum, _ := strconv.ParseInt(id, 10, 64)
+								db.SaveQQMsgMapping(qqMsgIDNum, qqGroupIDNum, senderID, senderNickname, content, yhMsgID)
+							}
 						}
 						log.Printf("[Sync Success] 成功同步 A2UI 消息到云湖群 %s (yhMsgId: %s)", g.ID, yhMsgID)
 					}
