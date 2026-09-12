@@ -313,7 +313,10 @@ type YunhuGroupInfoResp struct {
 	} `json:"data"`
 }
 
-var yhGroupNameCache sync.Map // map[string]string (groupID -> groupName)
+var (
+	yhGroupNameCache sync.Map // map[string]string (groupID -> groupName)
+	yhGroupInfoCache sync.Map // map[string]*YunhuGroupInfo
+)
 
 var GroupInfoBaseURL = "https://chat-web-go.jwzhd.com/v1/group/group-info"
 
@@ -360,8 +363,27 @@ func (c *Client) FetchGroupInfo(groupID string) (*YunhuGroupInfo, error) {
 	group := &result.Data.Group
 	if group.Name != "" {
 		yhGroupNameCache.Store(groupID, group.Name)
+		yhGroupInfoCache.Store(groupID, group)
 	}
 	return group, nil
+}
+
+// GetGroupInfo returns cached or newly fetched Yunhu group information
+func (c *Client) GetGroupInfo(groupID string) *YunhuGroupInfo {
+	if groupID == "" {
+		return nil
+	}
+	if val, ok := yhGroupInfoCache.Load(groupID); ok {
+		if g, ok := val.(*YunhuGroupInfo); ok && g != nil {
+			return g
+		}
+	}
+
+	info, err := c.FetchGroupInfo(groupID)
+	if err == nil && info != nil && info.Name != "" {
+		return info
+	}
+	return nil
 }
 
 // GetGroupName returns the human-readable Yunhu group name, fetching it dynamically from the official API.
@@ -385,6 +407,86 @@ func (c *Client) GetGroupName(groupID string) string {
 	// 避免短时间内因网络异常频繁重试，缓存兜底值
 	yhGroupNameCache.Store(groupID, fallback)
 	return fallback
+}
+
+type YunhuUserInfo struct {
+	UserID    string `json:"userId"`
+	Nickname  string `json:"nickname"`
+	AvatarURL string `json:"avatarUrl"`
+	IsVip     int    `json:"isVip"`
+}
+
+type YunhuUserInfoResp struct {
+	Code int    `json:"code"`
+	Msg  string `json:"msg"`
+	Data struct {
+		User YunhuUserInfo `json:"user"`
+	} `json:"data"`
+}
+
+var (
+	yhUserInfoCache sync.Map // map[string]*YunhuUserInfo
+)
+
+var UserHomepageBaseURL = "https://chat-web-go.jwzhd.com/v1/user/homepage"
+
+// FetchUserInfo queries user homepage info from Yunhu API https://chat-web-go.jwzhd.com/v1/user/homepage?userId={userId}
+func (c *Client) FetchUserInfo(userID string) (*YunhuUserInfo, error) {
+	if userID == "" {
+		return nil, fmt.Errorf("empty userID")
+	}
+
+	apiURL := fmt.Sprintf("%s?userId=%s", UserHomepageBaseURL, userID)
+	req, err := http.NewRequest("GET", apiURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36")
+	req.Header.Set("Accept", "application/json, text/plain, */*")
+
+	httpClient := c.httpClient
+	if httpClient == nil {
+		httpClient = &http.Client{Timeout: 5 * time.Second}
+	}
+
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	var result YunhuUserInfoResp
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, err
+	}
+
+	if result.Code != 1 && result.Code != 0 && !strings.EqualFold(result.Msg, "success") {
+		return nil, fmt.Errorf("api error: code=%d msg=%s", result.Code, result.Msg)
+	}
+
+	user := &result.Data.User
+	if user.Nickname != "" {
+		yhUserInfoCache.Store(userID, user)
+	}
+	return user, nil
+}
+
+// GetUserInfo returns cached or newly fetched Yunhu user information
+func (c *Client) GetUserInfo(userID string) *YunhuUserInfo {
+	if userID == "" {
+		return nil
+	}
+	if val, ok := yhUserInfoCache.Load(userID); ok {
+		if u, ok := val.(*YunhuUserInfo); ok && u != nil {
+			return u
+		}
+	}
+
+	info, err := c.FetchUserInfo(userID)
+	if err == nil && info != nil && info.Nickname != "" {
+		return info
+	}
+	return nil
 }
 
 var ImageUploadBaseURL = "https://chat-go.jwzhd.com"

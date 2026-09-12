@@ -52,7 +52,8 @@ func DetectRepeatedCharacters(message string, threshold int) bool {
 }
 
 func ReplaceBlockedWords(message string) string {
-	for _, words := range config.AppConfig.BlockedWords {
+	blockedMap := config.GetBlockedWords()
+	for _, words := range blockedMap {
 		for _, word := range words {
 			word = strings.TrimSpace(word)
 			if word == "" {

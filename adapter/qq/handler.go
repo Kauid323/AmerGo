@@ -107,6 +107,11 @@ func handleQQMessage(event model.OneBotEvent) {
 		groupID := event.GroupID.Int64()
 		groupIDStr := strconv.FormatInt(groupID, 10)
 
+		if banStatus, err := db.IsGroupInBlacklist(groupIDStr); err == nil && banStatus.IsBanned {
+			log.Printf("[QQ Filter] 群 %d 处于群黑名单中，忽略消息", groupID)
+			return
+		}
+
 		log.Printf("[QQ Group Msg] 群 %d 来自 %s(%d): %s", groupID, event.Sender.Nickname, senderUserID, rawMsg)
 
 		// 优先处理群指令（无论是 /cmd 还是 @Amer /cmd 还是 @Amer cmd）

@@ -37,6 +37,9 @@ func setupTestRouter(t *testing.T) *gin.Engine {
 	r.GET("/api/blacklist", BlacklistAPIHandler)
 	r.POST("/api/blacklist/add", AddBlacklistHandler)
 	r.POST("/api/blacklist/remove", RemoveBlacklistHandler)
+	r.GET("/api/group_blacklist", GroupBlacklistAPIHandler)
+	r.POST("/api/group_blacklist/add", AddGroupBlacklistHandler)
+	r.POST("/api/group_blacklist/remove", RemoveGroupBlacklistHandler)
 	r.GET("/api/system", SystemInfoAPIHandler)
 	r.GET("/api/logs", LogsAPIHandler)
 	r.GET("/api/logs/stream", LogsStreamHandler)
@@ -135,31 +138,39 @@ func TestWebUIEndpoints(t *testing.T) {
 		t.Errorf("unbind failed, got %d: %s", w.Code, w.Body.String())
 	}
 
-	// 8. 测试黑名单添加与移除
-	banPayload := map[string]interface{}{
-		"user_id":  "999888",
-		"reason":   "单元测试封禁",
+	// 8. 测试黑名单添加与平台判定
+	banPayloadQQ := map[string]interface{}{
+		"user_id":  "123456789", // >7 digits: QQ
+		"reason":   "QQ用户违规测试",
 		"duration": 3600,
 	}
-	banJSON, _ := json.Marshal(banPayload)
-	req, _ = http.NewRequest("POST", "/api/blacklist/add", bytes.NewReader(banJSON))
+	banJSONQQ, _ := json.Marshal(banPayloadQQ)
+	req, _ = http.NewRequest("POST", "/api/blacklist/add", bytes.NewReader(banJSONQQ))
 	req.Header.Set("Content-Type", "application/json")
 	w = httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 	if w.Code != http.StatusOK {
-		t.Errorf("add blacklist failed, got %d: %s", w.Code, w.Body.String())
+		t.Errorf("add QQ blacklist failed, got %d: %s", w.Code, w.Body.String())
 	}
 
-	// 查询黑名单
+	// 查询黑名单（全部）
 	req, _ = http.NewRequest("GET", "/api/blacklist", nil)
 	w = httptest.NewRecorder()
 	r.ServeHTTP(w, req)
-	if !strings.Contains(w.Body.String(), "999888") {
-		t.Errorf("blacklist list missing user: %s", w.Body.String())
+	if !strings.Contains(w.Body.String(), "123456789") || !strings.Contains(w.Body.String(), `"platform":"QQ"`) {
+		t.Errorf("blacklist list missing QQ user: %s", w.Body.String())
+	}
+
+	// 按平台筛选 QQ
+	req, _ = http.NewRequest("GET", "/api/blacklist?platform=qq", nil)
+	w = httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	if !strings.Contains(w.Body.String(), "123456789") {
+		t.Errorf("blacklist list with platform=qq missing user: %s", w.Body.String())
 	}
 
 	// 解除黑名单
-	unbanPayload := map[string]string{"user_id": "999888"}
+	unbanPayload := map[string]string{"user_id": "123456789"}
 	unbanJSON, _ := json.Marshal(unbanPayload)
 	req, _ = http.NewRequest("POST", "/api/blacklist/remove", bytes.NewReader(unbanJSON))
 	req.Header.Set("Content-Type", "application/json")
@@ -167,6 +178,40 @@ func TestWebUIEndpoints(t *testing.T) {
 	r.ServeHTTP(w, req)
 	if w.Code != http.StatusOK {
 		t.Errorf("remove blacklist failed, got %d: %s", w.Code, w.Body.String())
+	}
+
+	// 9. 测试群聊黑名单添加、查询与解除
+	groupBanPayload := map[string]interface{}{
+		"group_id": "987654321",
+		"reason":   "测试群黑名单",
+		"duration": 1800,
+	}
+	groupBanJSON, _ := json.Marshal(groupBanPayload)
+	req, _ = http.NewRequest("POST", "/api/group_blacklist/add", bytes.NewReader(groupBanJSON))
+	req.Header.Set("Content-Type", "application/json")
+	w = httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Errorf("add group blacklist failed, got %d: %s", w.Code, w.Body.String())
+	}
+
+	// 查询群黑名单
+	req, _ = http.NewRequest("GET", "/api/group_blacklist", nil)
+	w = httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	if !strings.Contains(w.Body.String(), "987654321") {
+		t.Errorf("group blacklist missing group: %s", w.Body.String())
+	}
+
+	// 解除群黑名单
+	groupUnbanPayload := map[string]string{"group_id": "987654321"}
+	groupUnbanJSON, _ := json.Marshal(groupUnbanPayload)
+	req, _ = http.NewRequest("POST", "/api/group_blacklist/remove", bytes.NewReader(groupUnbanJSON))
+	req.Header.Set("Content-Type", "application/json")
+	w = httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	if w.Code != http.StatusOK {
+		t.Errorf("remove group blacklist failed, got %d: %s", w.Code, w.Body.String())
 	}
 }
 

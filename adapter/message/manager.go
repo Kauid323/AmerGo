@@ -113,6 +113,12 @@ func SendToAllBindings(platform, id, msgType, content, senderID, senderNickname,
 		return "用户处于黑名单中"
 	}
 
+	groupBanStatus, err := db.IsGroupInBlacklist(id)
+	if err == nil && groupBanStatus.IsBanned {
+		log.Printf("[Sync] 源群聊 %s 处于群黑名单中，取消消息同步", id)
+		return "群聊处于黑名单中"
+	}
+
 	hasBlocked, cleaned := ContainsBlockedWords(content)
 	if hasBlocked {
 		content = cleaned
@@ -155,6 +161,12 @@ func SendToAllBindings(platform, id, msgType, content, senderID, senderNickname,
 
 		for _, g := range yhGroupIDs {
 			if g.Sync {
+				targetBan, err := db.IsGroupInBlacklist(g.ID)
+				if err == nil && targetBan.IsBanned {
+					log.Printf("[Sync] 目标云湖群 %s 处于群黑名单中，跳过同步", g.ID)
+					continue
+				}
+
 				keyAB := fmt.Sprintf("QQ:%s:YH:%s", id, g.ID)
 				keyBA := fmt.Sprintf("YH:%s:QQ:%s", g.ID, id)
 				db.SaveMessageLog(keyAB, msgToSave, "")
@@ -191,6 +203,12 @@ func SendToAllBindings(platform, id, msgType, content, senderID, senderNickname,
 
 		for _, g := range qqGroupIDs {
 			if g.Sync {
+				targetBan, err := db.IsGroupInBlacklist(g.ID)
+				if err == nil && targetBan.IsBanned {
+					log.Printf("[Sync] 目标 QQ 群 %s 处于群黑名单中，跳过同步", g.ID)
+					continue
+				}
+
 				keyAB := fmt.Sprintf("YH:%s:QQ:%s", id, g.ID)
 				keyBA := fmt.Sprintf("QQ:%s:YH:%s", g.ID, id)
 				db.SaveMessageLog(keyAB, msgToSave, "")

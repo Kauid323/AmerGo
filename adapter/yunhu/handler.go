@@ -432,6 +432,13 @@ func handleNormalMessage(event model.YunhuEvent) {
 		return
 	}
 
+	if chatID != "" {
+		if banStatus, err := db.IsGroupInBlacklist(chatID); err == nil && banStatus.IsBanned {
+			log.Printf("[Yunhu Filter] 群/频道 %s 处于群黑名单中，忽略消息", chatID)
+			return
+		}
+	}
+
 	// Cache Yunhu message ID, chatID, chatType for potential recall
 	if msg.MsgID.String() != "" {
 		db.SaveYunhuMsgCache(msg.MsgID.String(), chatID, chatType, senderID, msg.MsgID.String())
@@ -684,6 +691,13 @@ func handleInstructionMessage(event model.YunhuEvent) {
 	senderID := sender.SenderID.String()
 
 	log.Printf("[Yunhu Instruction] 收到指令: %s, 来自: %s, chatID: %s, chatType: %s", cmdName, sender.SenderNickname, chatID, chatType)
+
+	if chatID != "" {
+		if banStatus, err := db.IsGroupInBlacklist(chatID); err == nil && banStatus.IsBanned {
+			log.Printf("[Yunhu Filter] 群/频道 %s 处于群黑名单中，忽略指令", chatID)
+			return
+		}
+	}
 
 	if chatType == "group" {
 		switch cmdName {

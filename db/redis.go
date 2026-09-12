@@ -435,6 +435,163 @@ func GetBlacklist() []BlacklistItem {
 	return list
 }
 
+var (
+	memoryGroupBlacklistStore  sync.Map
+	memoryGroupBlacklistExpire sync.Map
+)
+
+type GroupBlacklistItem struct {
+	GroupID       string `json:"group_id"`
+	Reason        string `json:"reason"`
+	RemainingTime int64  `json:"remaining_time"`
+}
+
+func AddGroupToBlacklist(groupID string, reason string, duration int) error {
+	groupID = strings.TrimSpace(groupID)
+	if groupID == "" {
+		return fmt.Errorf("empty groupID")
+	}
+	key := fmt.Sprintf("group_blacklist:%s", groupID)
+	expireKey := fmt.Sprintf("group_blacklist_expire:%s", groupID)
+
+	now := time.Now().Unix()
+	var expireTime int64
+	if duration > 0 {
+		expireTime = now + int64(duration)
+		memoryGroupBlacklistExpire.Store(groupID, expireTime)
+	} else {
+		memoryGroupBlacklistExpire.Delete(groupID)
+	}
+	memoryGroupBlacklistStore.Store(groupID, reason)
+
+	if RDB != nil {
+		_ = RDB.Set(Ctx, key, reason, 0).Err()
+
+		if duration > 0 {
+			dur := time.Duration(duration) * time.Second
+			_ = RDB.Set(Ctx, expireKey, expireTime, dur).Err()
+			_ = RDB.Expire(Ctx, key, dur).Err()
+		} else {
+			_ = RDB.Del(Ctx, expireKey).Err()
+		}
+	}
+
+	return nil
+}
+
+func RemoveGroupFromBlacklist(groupID string) error {
+	groupID = strings.TrimSpace(groupID)
+	memoryGroupBlacklistStore.Delete(groupID)
+	memoryGroupBlacklistExpire.Delete(groupID)
+
+	if RDB == nil {
+		return nil
+	}
+	key := fmt.Sprintf("group_blacklist:%s", groupID)
+	expireKey := fmt.Sprintf("group_blacklist_expire:%s", groupID)
+	return RDB.Del(Ctx, key, expireKey).Err()
+}
+
+func IsGroupInBlacklist(groupID string) (BlacklistStatus, error) {
+	groupID = strings.TrimSpace(groupID)
+	if groupID == "" {
+		return BlacklistStatus{IsBanned: false}, nil
+	}
+	if RDB == nil {
+		if val, ok := memoryGroupBlacklistStore.Load(groupID); ok {
+			reason := val.(string)
+			var remainingTime int64
+			if expVal, ok := memoryGroupBlacklistExpire.Load(groupID); ok {
+				expTime := expVal.(int64)
+				now := time.Now().Unix()
+				if expTime > 0 && now > expTime {
+					_ = RemoveGroupFromBlacklist(groupID)
+					return BlacklistStatus{IsBanned: false}, nil
+				}
+				remainingTime = expTime - now
+			}
+			return BlacklistStatus{
+				IsBanned:      true,
+				Reason:        reason,
+				RemainingTime: remainingTime,
+			}, nil
+		}
+		return BlacklistStatus{IsBanned: false}, nil
+	}
+	key := fmt.Sprintf("group_blacklist:%s", groupID)
+	exists, err := RDB.Exists(Ctx, key).Result()
+	if err != nil || exists == 0 {
+		return BlacklistStatus{IsBanned: false}, nil
+	}
+
+	reason, _ := RDB.Get(Ctx, key).Result()
+	expireStr, _ := RDB.Get(Ctx, fmt.Sprintf("group_blacklist_expire:%s", groupID)).Result()
+
+	var remainingTime int64
+	if expireStr != "" {
+		var expireTime int64
+		fmt.Sscanf(expireStr, "%d", &expireTime)
+		now := time.Now().Unix()
+		if expireTime > 0 && now > expireTime {
+			_ = RemoveGroupFromBlacklist(groupID)
+			return BlacklistStatus{IsBanned: false}, nil
+		}
+		remainingTime = expireTime - now
+	}
+
+	return BlacklistStatus{
+		IsBanned:      true,
+		Reason:        reason,
+		RemainingTime: remainingTime,
+	}, nil
+}
+
+func GetGroupBlacklist() []GroupBlacklistItem {
+	var list []GroupBlacklistItem
+	groupMap := make(map[string]bool)
+
+	if RDB != nil {
+		keys, err := RDB.Keys(Ctx, "group_blacklist:*").Result()
+		if err == nil {
+			for _, k := range keys {
+				if strings.HasPrefix(k, "group_blacklist_expire:") {
+					continue
+				}
+				gid := strings.TrimPrefix(k, "group_blacklist:")
+				if gid != "" && !groupMap[gid] {
+					groupMap[gid] = true
+					status, _ := IsGroupInBlacklist(gid)
+					if status.IsBanned {
+						list = append(list, GroupBlacklistItem{
+							GroupID:       gid,
+							Reason:        status.Reason,
+							RemainingTime: status.RemainingTime,
+						})
+					}
+				}
+			}
+		}
+	}
+
+	memoryGroupBlacklistStore.Range(func(key, value interface{}) bool {
+		gid := key.(string)
+		if !groupMap[gid] {
+			groupMap[gid] = true
+			status, _ := IsGroupInBlacklist(gid)
+			if status.IsBanned {
+				list = append(list, GroupBlacklistItem{
+					GroupID:       gid,
+					Reason:        status.Reason,
+					RemainingTime: status.RemainingTime,
+				})
+			}
+		}
+		return true
+	})
+
+	return list
+}
+
 func DetectMessageFrequency(platform, userID string, threshold int, timeWindow int) bool {
 	if RDB == nil {
 		return false
